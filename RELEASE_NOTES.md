@@ -1,24 +1,38 @@
-# Twitter Hide Ads v1.0.0
+# Twitter Hide Ads v1.1.0
 
-First stable release of the LSPosed module for removing promoted posts from X Android.
+Twitter Hide Ads v1.1.0 restores promoted-post suppression after the X Android 12.8 update while retaining support for X 12.7.1.
 
-## Highlights
+## What changed
 
-- Blocks promoted posts before the Compose renderer draws them.
-- Validated against X Android 12.7.1 (`com.twitter.android`).
-- Uses X-owned `promoted-` timeline entry IDs and `TimelinePromotedMetadata`.
-- Requires no menu opening, learning database, advertiser list, or saved post IDs.
-- Installs only the primary render hook during normal operation.
-- Fails open on unsupported X versions.
-- Uses bounded fallback detection and rate-limited LSPosed logs.
+X 12.8.0 renamed the timeline render model and primary Compose boundary:
 
-## Installation
+```text
+X 12.7.1: a6$a -> c7.e(...)
+X 12.8.0: w5$a -> d7.e(...)
+```
 
-1. Install `TwitterHideAds-v1.0.0.apk`.
-2. Enable the module in LSPosed.
-3. Select only X (`com.twitter.android`) as the module scope.
-4. Force-stop X and reopen it.
+This release adds an exact X 12.8.0 compatibility profile and selects the correct profile from the installed X version. The temporary diagnostic DEX scanner and broad observer hooks have been removed from the release build.
 
-## Compatibility
+## Supported versions
 
-This release is validated for X 12.7.1. Later X versions may change internal obfuscated classes or fields. Unsupported versions are intentionally left unmodified and are reported in LSPosed logs.
+- X `12.7.1` and suffix builds
+- X `12.8.0` and suffix builds, including `12.8.0-release.0`
+
+Unknown X versions fail open instead of applying an unverified hook.
+
+## Detection and blocking
+
+A post is suppressed before Compose rendering when:
+
+- its timeline entry ID starts with `promoted-`; or
+- its direct `TimelinePromotedMetadata` value is non-null.
+
+Normal posts remain on the original X rendering path.
+
+## Validation
+
+The X 12.8.0 active build was runtime-tested and confirmed to block promoted posts successfully. The existing X 12.7.1 profile is retained.
+
+## Upgrade
+
+Install the v1.1.0 APK over the previous module, keep the LSPosed scope set to `com.twitter.android`, then force-stop and reopen X.

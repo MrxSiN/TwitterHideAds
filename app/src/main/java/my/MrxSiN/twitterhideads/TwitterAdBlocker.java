@@ -14,19 +14,9 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-/**
- * Pre-render advertisement suppression for the validated X 12.7.1 profile.
- *
- * The primary boundary receives the a6$a post render model before Compose emits
- * the post. Promoted posts are skipped by returning from the void method before
- * its original body runs.
- */
+/** Exact pre-render promoted-post suppression for validated X profiles. */
 public final class TwitterAdBlocker {
     private static final String TAG = "TwitterHideAds";
-
-    private static final String POST_INTERFACE = "com.x.urt.items.post.a6";
-    private static final String PRIMARY_CLASS = "com.x.urt.items.post.c7";
-    private static final String SECONDARY_CLASS = "com.x.urt.items.post.e";
 
     private static final int DETAILED_BLOCK_LOG_LIMIT = 3;
     private static final int PERIODIC_LOG_INTERVAL = 50;
@@ -45,52 +35,57 @@ public final class TwitterAdBlocker {
 
     public static void install(
             XC_LoadPackage.LoadPackageParam lpparam,
-            CompatibilityProfile.DetectedVersion detectedVersion
+            CompatibilityProfile.DetectedVersion detectedVersion,
+            CompatibilityProfile.Profile profile
     ) {
         if (!INSTALLED.compareAndSet(false, true)) {
             return;
         }
 
-        log("Installing pre-render suppression: profile="
-                + CompatibilityProfile.PROFILE_ID
+        log("Installing pre-render suppression: profile=" + profile.id
                 + ", X=" + detectedVersion.displayName()
                 + ", classifierSchema=" + BundledAdPatterns.SCHEMA_VERSION
-                + ", renderModel=" + BundledAdPatterns.EXPECTED_RENDER_MODEL);
+                + ", renderModel=" + profile.expectedRenderModel);
 
         Class<?> postInterface = XposedHelpers.findClassIfExists(
-                POST_INTERFACE,
+                profile.postInterface,
                 lpparam.classLoader
         );
 
         int primaryHooks = installBoundaryHooks(
                 lpparam.classLoader,
                 postInterface,
-                PRIMARY_CLASS,
-                "e",
-                "primary-c7.e"
+                profile,
+                profile.primaryClass,
+                profile.primaryMethod,
+                "primary-" + simpleName(profile.primaryClass)
+                        + "." + profile.primaryMethod
         );
 
         int secondaryHooks = 0;
         int tertiaryHooks = 0;
         String mode = "ACTIVE_PRIMARY";
 
-        // The fallback methods are nested beneath the primary path. Installing
-        // all three causes every normal post to be classified repeatedly. Only
-        // use them when the primary boundary is unavailable on the active APK.
+        // Fallback methods are nested under the primary path. Hook them only
+        // when the primary method is unavailable to avoid duplicate work.
         if (primaryHooks == 0) {
             secondaryHooks = installBoundaryHooks(
                     lpparam.classLoader,
                     postInterface,
-                    SECONDARY_CLASS,
-                    "a",
-                    "fallback-e.a"
+                    profile,
+                    profile.secondaryClass,
+                    profile.secondaryMethod,
+                    "fallback-" + simpleName(profile.secondaryClass)
+                            + "." + profile.secondaryMethod
             );
             tertiaryHooks = installBoundaryHooks(
                     lpparam.classLoader,
                     postInterface,
-                    PRIMARY_CLASS,
-                    "a",
-                    "fallback-c7.a"
+                    profile,
+                    profile.tertiaryClass,
+                    profile.tertiaryMethod,
+                    "fallback-" + simpleName(profile.tertiaryClass)
+                            + "." + profile.tertiaryMethod
             );
             mode = secondaryHooks + tertiaryHooks > 0
                     ? "ACTIVE_FALLBACK"
@@ -103,12 +98,13 @@ public final class TwitterAdBlocker {
                 + ", enforcement=" + mode
                 + ", persistence=NOT_REQUIRED"
                 + ", normalPostLogging=OFF"
-                + ", dexKit=0, globalViewHooks=0, deoptimized=0");
+                + ", dexScan=0, globalViewHooks=0, deoptimized=0");
     }
 
     private static int installBoundaryHooks(
             ClassLoader classLoader,
             Class<?> postInterface,
+            final CompatibilityProfile.Profile profile,
             String className,
             String methodName,
             final String boundary
@@ -121,7 +117,7 @@ public final class TwitterAdBlocker {
 
         int installed = 0;
         for (final Method method : type.getDeclaredMethods()) {
-            if (!isRenderBoundary(method, postInterface, methodName)) {
+            if (!isRenderBoundary(method, postInterface, profile, methodName)) {
                 continue;
             }
 
@@ -137,7 +133,10 @@ public final class TwitterAdBlocker {
                     }
 
                     BundledAdPatterns.Classification classification =
-                            BundledAdPatterns.classifyTimelinePost(postModel);
+                            BundledAdPatterns.classifyTimelinePost(
+                                    postModel,
+                                    profile.expectedRenderModel
+                            );
                     if (!classification.promoted) {
                         return;
                     }
@@ -156,6 +155,7 @@ public final class TwitterAdBlocker {
     private static boolean isRenderBoundary(
             Method method,
             Class<?> postInterface,
+            CompatibilityProfile.Profile profile,
             String expectedName
     ) {
         int modifiers = method.getModifiers();
@@ -175,7 +175,8 @@ public final class TwitterAdBlocker {
         Class<?> first = parameters[0];
         boolean postArgument = postInterface != null
                 ? postInterface.isAssignableFrom(first)
-                : first.getName().startsWith("com.x.urt.items.post.a6");
+                : first.getName().equals(profile.expectedRenderModel)
+                || first.getName().startsWith(profile.postInterface);
         if (!postArgument) {
             return false;
         }
@@ -234,6 +235,11 @@ public final class TwitterAdBlocker {
             log("Hook failed for " + member + ": " + describeThrowable(throwable));
             return false;
         }
+    }
+
+    private static String simpleName(String className) {
+        int dot = className.lastIndexOf('.');
+        return dot >= 0 ? className.substring(dot + 1) : className;
     }
 
     private static String safeEntryId(String entryId) {

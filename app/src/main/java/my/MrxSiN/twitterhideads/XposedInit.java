@@ -12,7 +12,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /** LSPosed entry point. Scope the module only to com.twitter.android. */
 public final class XposedInit implements IXposedHookLoadPackage {
     private static final String TAG = "TwitterHideAds";
-    private static final String MODULE_VERSION = "1.0.0";
+    private static final String MODULE_VERSION = "1.1.0";
 
     private static final AtomicBoolean ATTACH_HOOK_INSTALLED =
             new AtomicBoolean(false);
@@ -43,10 +43,7 @@ public final class XposedInit implements IXposedHookLoadPackage {
                     "android.content.Context",
                     lpparam.classLoader
             );
-            Method attach = applicationClass.getDeclaredMethod(
-                    "attach",
-                    contextClass
-            );
+            Method attach = applicationClass.getDeclaredMethod("attach", contextClass);
             attach.setAccessible(true);
 
             XposedBridge.hookMethod(attach, new XC_MethodHook() {
@@ -61,20 +58,22 @@ public final class XposedInit implements IXposedHookLoadPackage {
                             : null;
                     CompatibilityProfile.DetectedVersion detected =
                             CompatibilityProfile.detect(context);
+                    CompatibilityProfile.Profile profile =
+                            CompatibilityProfile.select(detected);
 
                     log("Detected X version=" + detected.displayName()
                             + ", versionCode=" + detected.displayCode()
                             + ", selectedProfile="
-                            + CompatibilityProfile.PROFILE_ID);
+                            + (profile == null ? "none" : profile.id));
 
-                    if (!CompatibilityProfile.supports(detected)) {
+                    if (profile == null) {
                         log("Unsupported or unknown X version; fail-open mode active. "
                                 + "No render hooks installed.");
                         return;
                     }
 
                     try {
-                        TwitterAdBlocker.install(lpparam, detected);
+                        TwitterAdBlocker.install(lpparam, detected, profile);
                     } catch (Throwable throwable) {
                         log("Fatal initialization failure");
                         XposedBridge.log(throwable);

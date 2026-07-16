@@ -1,26 +1,28 @@
 # Changelog
 
-## 1.0.0 — 2026-07-16
+All notable changes to Twitter Hide Ads are documented here.
 
-- Published the first stable release of Twitter Hide Ads.
-- Added active pre-render suppression for X Android 12.7.1.
-- Added direct promoted-post classification using:
-  - timeline entry IDs beginning with `promoted-`;
-  - `com.x.models.TimelinePromotedMetadata` on the post render model.
-- Added the confirmed promoted action enums as a bounded compatibility fallback:
-  - `PromotedDismissAd`;
-  - `PromotedAdsInfo`;
-  - `PromotedReportAd`.
-- Added the primary Compose boundary `com.x.urt.items.post.c7.e(...)`.
-- Added conditional fallback boundaries that are installed only when the primary hook is unavailable.
-- Added X-version detection at `Application.attach()` and compatibility profile `x-12.7.1`.
-- Added fail-open behavior for unknown versions, missing boundaries, and hook errors.
-- Removed the need for menu inspection, per-user learning, saved advertiser IDs, saved post IDs, or fixed feed-position rules.
-- Reduced normal-operation overhead by disabling normal-post logs and avoiding duplicate fallback inspection.
-- Added separate blocked-attempt and distinct-entry counters with rate-limited LSPosed output.
-- Added GitHub Actions CI for checks, signed release builds, APK signature verification, workflow artifacts, and tagged GitHub Releases.
-- Added release documentation, hook notes, release notes, and signing-secret instructions.
+## 1.1.0 - 2026-07-17
 
-## Development history
+### Added
 
-The stable classifier was identified through internal diagnostic builds that traced X's post menu, promoted action enums, post options model, render model, and Compose call path. The public release series begins at `1.0.0`.
+- Stable promoted-post suppression for X `12.8.0-release.0`.
+- A dedicated X 12.8.0 compatibility profile using:
+  - `com.x.urt.items.post.w5$a`
+  - `com.x.urt.items.post.d7.e(...)`
+  - `com.x.urt.items.post.e.a(...)`
+  - `com.x.urt.items.post.d7.a(...)`
+- Version-aware selection between the validated X 12.7.1 and X 12.8.0 hook profiles.
+
+### Changed
+
+- Updated promoted-post model detection for the X 12.8.0 `w5$a` model.
+- Replaced the temporary X 12.8.0 diagnostic scanner with exact, lightweight render hooks.
+- Kept fallback hooks inactive unless the primary render boundary is unavailable.
+- Updated release documentation and project metadata for the stable GitHub release.
+- Increased Android `versionCode` from `18` to `22` across the development and release cycle.
+
+## 1.0.0
+
+- First stable release for X 12.7.1.
+- Added promoted-post suppression before Compose rendering.

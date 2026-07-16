@@ -18,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Advertisement-classification rules shipped inside the APK.
  *
- * X 12.7.1 exposes two ad-specific properties on the post render model:
+ * Validated X 12.7.1 and X 12.8.0 render models expose two ad-specific properties:
  *  - an entry ID beginning with "promoted-";
  *  - a direct com.x.models.TimelinePromotedMetadata field.
  *
@@ -27,9 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * advertiser or post IDs are required.
  */
 final class BundledAdPatterns {
-    static final String SCHEMA_VERSION = "3";
-    static final String TESTED_X_VERSION = CompatibilityProfile.TESTED_VERSION_PREFIX;
-    static final String EXPECTED_RENDER_MODEL = "com.x.urt.items.post.a6$a";
+    static final String SCHEMA_VERSION = "5";
     static final String PROMOTED_METADATA_CLASS =
             "com.x.models.TimelinePromotedMetadata";
     static final String ACTION_ENUM_CLASS = "com.x.models.PostActionType";
@@ -54,7 +52,10 @@ final class BundledAdPatterns {
     private BundledAdPatterns() {
     }
 
-    static Classification classifyTimelinePost(Object model) {
+    static Classification classifyTimelinePost(
+            Object model,
+            String expectedRenderModel
+    ) {
         if (model == null) {
             return Classification.NORMAL;
         }
@@ -111,9 +112,10 @@ final class BundledAdPatterns {
             return new Classification(true, entryId, signals, false);
         }
 
-        // The known a6$a render model has definitive direct fields. Avoid a
-        // graph walk for every normal timeline item on the tested X version.
-        if (EXPECTED_RENDER_MODEL.equals(model.getClass().getName())) {
+        // Validated render models have definitive direct fields. Avoid a graph
+        // walk for every normal timeline item on supported X versions.
+        if (expectedRenderModel != null
+                && expectedRenderModel.equals(model.getClass().getName())) {
             return new Classification(
                     false,
                     entryId,

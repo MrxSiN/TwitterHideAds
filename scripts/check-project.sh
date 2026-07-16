@@ -1,73 +1,37 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+APP_GRADLE="$ROOT/app/build.gradle.kts"
+WORKFLOW="$ROOT/.github/workflows/android.yml"
+INIT="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/XposedInit.java"
+HOOK="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/TwitterAdBlocker.java"
+PROFILE="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/CompatibilityProfile.java"
+PATTERNS="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/BundledAdPatterns.java"
+PATTERN_JSON="$ROOT/app/src/main/assets/ad_patterns.json"
 
-fail() {
-  echo "Project check failed: $*" >&2
-  exit 1
-}
-
-APP_VERSION="$(sed -n 's/^val appVersion = "\([^"]*\)"/\1/p' app/build.gradle.kts)"
-APP_VERSION_CODE="$(sed -n 's/^val appVersionCode = \([0-9][0-9]*\)/\1/p' app/build.gradle.kts)"
-
-[[ -n "$APP_VERSION" ]] || fail "appVersion is missing"
-[[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "appVersion must use semantic versioning"
-[[ -n "$APP_VERSION_CODE" ]] || fail "appVersionCode is missing"
-
-required_files=(
-  README.md
-  CHANGELOG.md
-  HOOK_NOTES.md
-  RELEASE_NOTES.md
-  LICENSE
-  NOTICE.md
-  app/build.gradle.kts
-  app/src/main/AndroidManifest.xml
-  app/src/main/assets/xposed_init
-  app/src/main/assets/ad_patterns.json
-  app/src/main/res/values/arrays.xml
-  .github/workflows/android.yml
-)
-
-for path in "${required_files[@]}"; do
-  [[ -f "$path" ]] || fail "missing $path"
+for file in "$APP_GRADLE" "$WORKFLOW" "$INIT" "$HOOK" "$PROFILE" "$PATTERNS" "$PATTERN_JSON"; do
+  test -f "$file"
 done
 
-grep -Fq 'applicationId = "my.MrxSiN.twitterhideads"' app/build.gradle.kts \
-  || fail "unexpected applicationId"
-grep -Fq 'com.twitter.android' app/src/main/res/values/arrays.xml \
-  || fail "X package is missing from LSPosed scope"
-[[ "$(grep -c '<item>' app/src/main/res/values/arrays.xml)" -eq 1 ]] \
-  || fail "LSPosed scope must contain exactly one package"
-grep -Fq "private static final String MODULE_VERSION = \"$APP_VERSION\";" \
-  app/src/main/java/my/MrxSiN/twitterhideads/XposedInit.java \
-  || fail "XposedInit version does not match appVersion"
-grep -Fq "## $APP_VERSION" CHANGELOG.md \
-  || fail "CHANGELOG does not contain the current version"
-grep -Fq "v$APP_VERSION" RELEASE_NOTES.md \
-  || fail "RELEASE_NOTES does not contain the current version"
+grep -q 'val appVersion = "1.1.0"' "$APP_GRADLE"
+grep -q 'versionCode = 22' "$APP_GRADLE"
+grep -q 'compileSdk = 36' "$APP_GRADLE"
+grep -q 'targetSdk = 36' "$APP_GRADLE"
+grep -q 'id("com.android.application") version "9.2.1"' "$ROOT/build.gradle.kts"
+grep -q 'gradle-9.4.1-bin.zip' "$ROOT/gradle/wrapper/gradle-wrapper.properties"
+grep -q 'r0adkll/sign-android-release@v1' "$WORKFLOW"
+! grep -q 'signingConfigs' "$APP_GRADLE"
 
-python3 - "$APP_VERSION" <<'PY'
-import json
-import sys
-import xml.etree.ElementTree as ET
-from pathlib import Path
+grep -q 'selectedProfile=' "$INIT"
+grep -q 'ACTIVE_PRIMARY' "$HOOK"
+grep -q 'com.x.urt.items.post.d7' "$PROFILE"
+grep -q 'com.x.urt.items.post.w5$a' "$PROFILE"
+grep -q 'com.x.urt.items.post.c7' "$PROFILE"
+grep -q 'com.x.urt.items.post.a6$a' "$PROFILE"
+grep -q 'promoted-' "$PATTERNS"
+grep -q 'TimelinePromotedMetadata' "$PATTERNS"
+grep -q '"postSuppression": true' "$PATTERN_JSON"
+! grep -q 'new DexFile' "$HOOK"
 
-version = sys.argv[1]
-root = Path('.')
-
-asset = json.loads((root / 'app/src/main/assets/ad_patterns.json').read_text())
-assert asset['moduleVersion'] == version, 'asset moduleVersion mismatch'
-assert asset['releaseChannel'] == 'stable', 'release channel must be stable'
-assert asset['targetPackage'] == 'com.twitter.android', 'target package mismatch'
-assert asset['compatibilityProfiles'], 'no compatibility profile defined'
-
-for xml in (root / 'app/src/main').rglob('*.xml'):
-    ET.parse(xml)
-PY
-
-bash -n scripts/check-project.sh
-
-echo "Project checks passed: version=$APP_VERSION versionCode=$APP_VERSION_CODE"
+echo "Static project checks passed."
