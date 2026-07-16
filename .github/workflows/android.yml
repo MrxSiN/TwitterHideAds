@@ -41,9 +41,14 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK Platform 37
+      - name: Install Android SDK packages
         shell: bash
-        run: yes | sdkmanager "platforms;android-37" "build-tools;37.0.0" >/dev/null
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+          sdkmanager --list_installed
 
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
