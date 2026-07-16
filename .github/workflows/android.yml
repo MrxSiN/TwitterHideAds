@@ -1,0 +1,167 @@
+name: Android CI & Release
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build, sign and upload APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY }}
+      SIGNING_KEY_ALIAS: ${{ secrets.ALIAS }}
+      SIGNING_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+      SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 37
+        shell: bash
+        run: yes | sdkmanager "platforms;android-37" "build-tools;37.0.0" >/dev/null
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission
+        run: chmod +x gradlew scripts/check-project.sh
+
+      - name: Run project checks
+        run: ./scripts/check-project.sh
+
+      - name: Read project version
+        id: metadata
+        shell: bash
+        run: |
+          VERSION="$(sed -n 's/^val appVersion = "\([^"]*\)"/\1/p' app/build.gradle.kts)"
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "apk_path=app/build/outputs/apk/release/TwitterHideAds-v$VERSION.apk" >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match project version v$VERSION." >&2
+            exit 1
+          fi
+
+      - name: Check signing configuration
+        id: signing
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Pull-request builds are intentionally unsigned because signing secrets are not exposed to PR code."
+            exit 0
+          fi
+
+          missing=()
+          [[ -n "$SIGNING_KEY_BASE64" ]] || missing+=(SIGNING_KEY)
+          [[ -n "$SIGNING_KEY_ALIAS" ]] || missing+=(ALIAS)
+          [[ -n "$SIGNING_STORE_PASSWORD" ]] || missing+=(STORE_PASSWORD)
+          [[ -n "$SIGNING_KEY_PASSWORD" ]] || missing+=(KEY_PASSWORD)
+
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required GitHub Actions secrets: %s\n' "${missing[*]}" >&2
+            echo "Add all four secrets under Settings > Secrets and variables > Actions." >&2
+            exit 1
+          fi
+
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Decode release keystore
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/twitterhideads-release.keystore"
+          chmod 600 "$RUNNER_TEMP/twitterhideads-release.keystore"
+
+      - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/twitterhideads-release.keystore
+          ANDROID_KEYSTORE_ALIAS: ${{ env.SIGNING_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ env.SIGNING_STORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ env.SIGNING_KEY_PASSWORD }}
+        run: ./gradlew clean assembleRelease --no-daemon --stacktrace
+
+      - name: Normalize APK filename
+        id: apk
+        shell: bash
+        run: |
+          TARGET_PATH="${{ steps.metadata.outputs.apk_path }}"
+          mkdir -p "$(dirname "$TARGET_PATH")"
+
+          mapfile -t APK_CANDIDATES < <(
+            find app/build/outputs/apk/release \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' \
+              ! -name 'TwitterHideAds-v*.apk' \
+              | sort
+          )
+
+          if (( ${#APK_CANDIDATES[@]} == 0 )); then
+            echo "No release APK was produced." >&2
+            find app/build/outputs -maxdepth 5 -type f -print || true
+            exit 1
+          fi
+
+          SOURCE_PATH="${APK_CANDIDATES[0]}"
+          cp "$SOURCE_PATH" "$TARGET_PATH"
+          test -f "$TARGET_PATH"
+          echo "path=$TARGET_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK signature
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "${{ steps.apk.outputs.path }}"
+
+      - name: Report unsigned pull-request build
+        if: steps.signing.outputs.enabled != 'true'
+        run: echo "Unsigned pull-request APK built successfully."
+
+      - name: Upload APK to workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TwitterHideAds-v${{ steps.metadata.outputs.version }}-${{ github.run_number }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Twitter Hide Ads v${{ steps.metadata.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          files: ${{ steps.apk.outputs.path }}
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}

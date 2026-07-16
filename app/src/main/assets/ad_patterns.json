@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 3,
+  "moduleVersion": "1.0.0",
+  "releaseChannel": "stable",
+  "targetPackage": "com.twitter.android",
+  "compatibilityProfiles": [
+    {
+      "id": "x-12.7.1",
+      "acceptedVersionPrefix": "12.7.1",
+      "renderBoundary": {
+        "primary": "com.x.urt.items.post.c7.e",
+        "fallbacks": [
+          "com.x.urt.items.post.e.a",
+          "com.x.urt.items.post.c7.a"
+        ],
+        "fallbackInstallPolicy": "install only when the primary boundary is unavailable",
+        "firstArgumentModel": "com.x.urt.items.post.a6$a"
+      }
+    }
+  ],
+  "classification": {
+    "directSignals": [
+      "entryId starts with promoted-",
+      "direct field is com.x.models.TimelinePromotedMetadata"
+    ],
+    "fallbackEnumClass": "com.x.models.PostActionType",
+    "fallbackPromotedActions": [
+      "PromotedDismissAd",
+      "PromotedAdsInfo",
+      "PromotedReportAd"
+    ]
+  },
+  "runtimePolicy": {
+    "unknownVersion": "fail open",
+    "persistenceRequired": false,
+    "normalPostLogging": false,
+    "detailedBlockLogs": 3,
+    "periodicBlockLogInterval": 50
+  },
+  "notes": "The classifier is bundled in the APK and applies immediately on a fresh installation. Runtime implementation is compiled into BundledAdPatterns.java."
+}
