@@ -20,7 +20,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Blocks promoted posts in X/Twitter before Compose rendering" />
+            android:value="Hide promoted posts in supported X versions before Compose rendering" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />

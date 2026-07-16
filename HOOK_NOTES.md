@@ -1,23 +1,46 @@
-# Hook notes
+# Hook Notes
 
-## Validated target
+This document records the validated hook profiles used by Twitter Hide Ads v1.1.0.
+
+## Enforcement model
+
+The module detects the installed X version and selects one exact compatibility profile. Each profile defines:
+
+- the post interface or base model;
+- the expected concrete render model;
+- one primary `void` Compose render boundary;
+- two fallback `void` Compose boundaries.
+
+Only the primary boundary is installed under normal conditions. Fallback boundaries are installed only when the primary method cannot be found.
+
+## Profile table
+
+| X version | Model base | Render model | Primary boundary | Secondary | Tertiary |
+|---|---|---|---|---|---|
+| 12.7.1 | `a6` | `a6$a` | `c7.e` | `e.a` | `c7.a` |
+| 12.8.0 | `w5` | `w5$a` | `d7.e` | `e.a` | `d7.a` |
+
+Suffix versions such as `12.8.0-release.0` match the corresponding profile prefix.
+
+## X 12.8.0 mapping
+
+Runtime diagnostics on X `12.8.0-release.0` identified this post-render sequence:
 
 ```text
-Package: com.twitter.android
-X version: 12.7.1
-Compatibility profile: x-12.7.1
-Concrete render model: com.x.urt.items.post.a6$a
+UrtTimelinePost
+  -> com.x.urt.items.post.n4.u(Composer)
+  -> com.x.urt.items.post.w5$a
+  -> com.x.urt.items.post.d7.e(...)
+  -> com.x.urt.items.post.e.a(...)
 ```
 
-The version guard runs after `android.app.Application.attach(Context)`. Unsupported or unknown X versions do not receive render hooks.
-
-## Primary pre-render boundary
+The selected primary boundary is:
 
 ```text
-public static final void com.x.urt.items.post.c7.e(
-    com.x.urt.items.post.a6,
+public static final void com.x.urt.items.post.d7.e(
+    com.x.urt.items.post.w5,
     androidx.compose.ui.Modifier$a,
-    com.x.urt.items.post.c6,
+    com.x.urt.items.post.y5,
     androidx.compose.foundation.layout.u3,
     androidx.compose.runtime.Composer,
     int,
@@ -25,105 +48,46 @@ public static final void com.x.urt.items.post.c7.e(
 )
 ```
 
-The first argument is the post render model. In the validated X release, promoted models were observed as `com.x.urt.items.post.a6$a` before the original Compose body executed.
-
-Replacement behavior:
-
-```java
-if (BundledAdPatterns.classifyTimelinePost(param.args[0]).promoted) {
-    param.setResult(null);
-}
-```
-
-Because the target returns `void`, setting a null result skips the original renderer without fabricating an incompatible return object.
-
-## Direct promoted signals
-
-The validated model exposes both of these signals:
+At method entry, argument 0 resolves to `com.x.urt.items.post.w5$a`. Promoted samples contained:
 
 ```text
-field a / entryId = promoted-tweet-<post ID>
+field a = promoted-tweet-...
 field m = com.x.models.TimelinePromotedMetadata
 ```
 
-The classifier accepts either direct signal:
+Because the boundary returns `void`, the hook can suppress only the promoted item by calling `param.setResult(null)` before the original Compose body runs.
 
-```text
-entryId starts with "promoted-"
-OR
-runtime field value is exactly com.x.models.TimelinePromotedMetadata
-```
+## Classification
 
-Observed normal entries used `tweet-<post ID>` and did not carry `TimelinePromotedMetadata`.
+The direct classifier checks cached fields on the render model.
 
-The module does not classify ordinary post text, captions, usernames, or fixed timeline positions.
+Strong signals:
 
-## Bundled action fallback
+1. A String field, prioritizing obfuscated field `a`, starts with `promoted-`.
+2. A direct field contains `com.x.models.TimelinePromotedMetadata`.
+3. Obfuscated field `m` contains `TimelinePromotedMetadata` when its declared type is generalized.
 
-Earlier menu-structure probes confirmed that ad post-option models contain:
+Fallback action signals remain available for unfamiliar model shapes:
 
-```text
-com.x.models.PostActionType#PromotedDismissAd
-com.x.models.PostActionType#PromotedAdsInfo
-com.x.models.PostActionType#PromotedReportAd
-```
+- `PromotedDismissAd`
+- `PromotedAdsInfo`
+- `PromotedReportAd`
 
-These enum names are retained as a bounded fallback for an unfamiliar render-model class. The known `a6$a` path returns after direct-field inspection, so normal X 12.7.1 posts do not incur a recursive object-graph scan.
+For validated `a6$a` and `w5$a` models, a normal post returns after direct-field inspection. It does not incur a recursive object-graph scan.
 
-## Fallback render boundaries
+## Boundaries intentionally not used
 
-Fallback hooks are installed only when no primary `c7.e(...)` method matches:
+`com.x.urt.items.post.n4.u(Composer)` returns a `w5` model. Returning `null` there could violate caller assumptions and is therefore not used for enforcement.
 
-```text
-com.x.urt.items.post.e.a(...): void
-com.x.urt.items.post.c7.a(...): void
-```
+Serializer, database, constructor, menu, and promoted-action initialization paths identify ad-related data but do not represent the final post-render boundary. They are not hooked in the release build.
 
-Installing all three paths simultaneously was rejected because they are nested in the same render sequence and would classify each normal post repeatedly.
+## Runtime policy
 
-## Method selection requirements
-
-A candidate render boundary must satisfy all of the following:
-
-1. Exact expected method name for the selected compatibility profile.
-2. Non-abstract, non-native, non-synthetic method.
-3. `void` return type.
-4. Between 1 and 10 parameters.
-5. First parameter assignable to `com.x.urt.items.post.a6`, or an equivalent `a6*` class when the interface cannot be resolved.
-6. At least one `androidx.compose.runtime.Composer` parameter.
-
-No arbitrary method is hooked when these structural requirements are not met.
-
-## Runtime and logging policy
-
-- Primary hook only during normal operation.
-- First three distinct promoted entries receive detailed logs.
-- Aggregate output is emitted every 50 blocked render attempts.
-- Render attempts and unique promoted entry IDs use separate counters.
-- Normal posts are not logged.
-- Advertiser and post identifiers are not persisted.
-- No DexKit scanning, deoptimization, global view hooks, accessibility scanning, or network requests are used.
-
-## Fail-open conditions
-
-The original X behavior remains intact when:
-
-- the installed X version is unsupported;
-- package-version detection fails;
-- the post interface cannot be resolved and no structurally valid boundary exists;
-- hook installation throws an exception;
-- the model does not contain a bundled promoted signal.
-
-## App-update maintenance
-
-When a future X update changes the obfuscated path, collect these LSPosed lines first:
-
-```text
-Detected X version=...
-Render boundary class not found: ...
-Installed pre-render boundary [...]
-Initialization complete: ...
-Hook failed for ...
-```
-
-A new compatibility profile should be added only after the promoted model and safe pre-render boundary are confirmed on-device.
+- Unsupported X versions fail open.
+- Missing boundaries fail open.
+- No DEX scanning in the release build.
+- No global View hooks.
+- No deoptimization.
+- No database or learned advertiser list.
+- Normal-post logging is disabled.
+- The first three unique blocked entries are logged; aggregate counts are logged every 50 block attempts.

@@ -2,11 +2,35 @@ package my.MrxSiN.twitterhideads;
 
 import de.robv.android.xposed.XposedHelpers;
 
-/** Compatibility profile bundled for the X release validated during testing. */
+/** Exact render-hook mappings validated for supported X releases. */
 final class CompatibilityProfile {
-    static final String PROFILE_ID = "x-12.7.1";
     static final String TARGET_PACKAGE = "com.twitter.android";
-    static final String TESTED_VERSION_PREFIX = "12.7.1";
+
+    private static final Profile X_12_7_1 = new Profile(
+            "x-12.7.1",
+            "12.7.1",
+            "com.x.urt.items.post.a6",
+            "com.x.urt.items.post.a6$a",
+            "com.x.urt.items.post.c7",
+            "e",
+            "com.x.urt.items.post.e",
+            "a",
+            "com.x.urt.items.post.c7",
+            "a"
+    );
+
+    private static final Profile X_12_8_0 = new Profile(
+            "x-12.8.0",
+            "12.8.0",
+            "com.x.urt.items.post.w5",
+            "com.x.urt.items.post.w5$a",
+            "com.x.urt.items.post.d7",
+            "e",
+            "com.x.urt.items.post.e",
+            "a",
+            "com.x.urt.items.post.d7",
+            "a"
+    );
 
     private CompatibilityProfile() {
     }
@@ -16,10 +40,7 @@ final class CompatibilityProfile {
             return DetectedVersion.UNKNOWN;
         }
         try {
-            Object packageManager = XposedHelpers.callMethod(
-                    context,
-                    "getPackageManager"
-            );
+            Object packageManager = XposedHelpers.callMethod(context, "getPackageManager");
             Object packageInfo = XposedHelpers.callMethod(
                     packageManager,
                     "getPackageInfo",
@@ -32,18 +53,12 @@ final class CompatibilityProfile {
 
             long versionCode = -1L;
             try {
-                Object rawCode = XposedHelpers.callMethod(
-                        packageInfo,
-                        "getLongVersionCode"
-                );
+                Object rawCode = XposedHelpers.callMethod(packageInfo, "getLongVersionCode");
                 if (rawCode instanceof Number) {
                     versionCode = ((Number) rawCode).longValue();
                 }
             } catch (Throwable ignored) {
-                Object rawCode = XposedHelpers.getObjectField(
-                        packageInfo,
-                        "versionCode"
-                );
+                Object rawCode = XposedHelpers.getObjectField(packageInfo, "versionCode");
                 if (rawCode instanceof Number) {
                     versionCode = ((Number) rawCode).longValue();
                 }
@@ -55,16 +70,63 @@ final class CompatibilityProfile {
         }
     }
 
-    static boolean supports(DetectedVersion version) {
+    static Profile select(DetectedVersion version) {
         if (version == null || version.versionName == null) {
-            return false;
+            return null;
         }
-        String name = version.versionName.trim();
-        return name.equals(TESTED_VERSION_PREFIX)
-                || name.startsWith(TESTED_VERSION_PREFIX + "-")
-                || name.startsWith(TESTED_VERSION_PREFIX + ".")
-                || name.startsWith(TESTED_VERSION_PREFIX + "+")
-                || name.startsWith(TESTED_VERSION_PREFIX + " ");
+        if (matchesPrefix(version.versionName, X_12_8_0.versionPrefix)) {
+            return X_12_8_0;
+        }
+        if (matchesPrefix(version.versionName, X_12_7_1.versionPrefix)) {
+            return X_12_7_1;
+        }
+        return null;
+    }
+
+    private static boolean matchesPrefix(String rawName, String prefix) {
+        String name = rawName.trim();
+        return name.equals(prefix)
+                || name.startsWith(prefix + "-")
+                || name.startsWith(prefix + ".")
+                || name.startsWith(prefix + "+")
+                || name.startsWith(prefix + " ");
+    }
+
+    static final class Profile {
+        final String id;
+        final String versionPrefix;
+        final String postInterface;
+        final String expectedRenderModel;
+        final String primaryClass;
+        final String primaryMethod;
+        final String secondaryClass;
+        final String secondaryMethod;
+        final String tertiaryClass;
+        final String tertiaryMethod;
+
+        Profile(
+                String id,
+                String versionPrefix,
+                String postInterface,
+                String expectedRenderModel,
+                String primaryClass,
+                String primaryMethod,
+                String secondaryClass,
+                String secondaryMethod,
+                String tertiaryClass,
+                String tertiaryMethod
+        ) {
+            this.id = id;
+            this.versionPrefix = versionPrefix;
+            this.postInterface = postInterface;
+            this.expectedRenderModel = expectedRenderModel;
+            this.primaryClass = primaryClass;
+            this.primaryMethod = primaryMethod;
+            this.secondaryClass = secondaryClass;
+            this.secondaryMethod = secondaryMethod;
+            this.tertiaryClass = tertiaryClass;
+            this.tertiaryMethod = tertiaryMethod;
+        }
     }
 
     static final class DetectedVersion {
