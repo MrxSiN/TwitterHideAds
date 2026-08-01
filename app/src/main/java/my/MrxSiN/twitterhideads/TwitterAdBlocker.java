@@ -14,7 +14,7 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-/** Exact pre-render promoted-post suppression for validated X profiles. */
+/** Exact and adaptively resolved pre-render promoted-post suppression. */
 public final class TwitterAdBlocker {
     private static final String TAG = "TwitterHideAds";
 
@@ -33,7 +33,7 @@ public final class TwitterAdBlocker {
     private TwitterAdBlocker() {
     }
 
-    public static void install(
+    static void installExact(
             XC_LoadPackage.LoadPackageParam lpparam,
             CompatibilityProfile.DetectedVersion detectedVersion,
             CompatibilityProfile.Profile profile
@@ -42,7 +42,7 @@ public final class TwitterAdBlocker {
             return;
         }
 
-        log("Installing pre-render suppression: profile=" + profile.id
+        log("Installing exact pre-render suppression: profile=" + profile.id
                 + ", X=" + detectedVersion.displayName()
                 + ", classifierSchema=" + BundledAdPatterns.SCHEMA_VERSION
                 + ", renderModel=" + profile.expectedRenderModel);
@@ -52,7 +52,7 @@ public final class TwitterAdBlocker {
                 lpparam.classLoader
         );
 
-        int primaryHooks = installBoundaryHooks(
+        int primaryHooks = installExactBoundaryHooks(
                 lpparam.classLoader,
                 postInterface,
                 profile,
@@ -64,12 +64,10 @@ public final class TwitterAdBlocker {
 
         int secondaryHooks = 0;
         int tertiaryHooks = 0;
-        String mode = "ACTIVE_PRIMARY";
+        String mode = "ACTIVE_EXACT_PRIMARY";
 
-        // Fallback methods are nested under the primary path. Hook them only
-        // when the primary method is unavailable to avoid duplicate work.
         if (primaryHooks == 0) {
-            secondaryHooks = installBoundaryHooks(
+            secondaryHooks = installExactBoundaryHooks(
                     lpparam.classLoader,
                     postInterface,
                     profile,
@@ -78,7 +76,7 @@ public final class TwitterAdBlocker {
                     "fallback-" + simpleName(profile.secondaryClass)
                             + "." + profile.secondaryMethod
             );
-            tertiaryHooks = installBoundaryHooks(
+            tertiaryHooks = installExactBoundaryHooks(
                     lpparam.classLoader,
                     postInterface,
                     profile,
@@ -88,20 +86,56 @@ public final class TwitterAdBlocker {
                             + "." + profile.tertiaryMethod
             );
             mode = secondaryHooks + tertiaryHooks > 0
-                    ? "ACTIVE_FALLBACK"
+                    ? "ACTIVE_EXACT_FALLBACK"
                     : "FAIL_OPEN_NO_BOUNDARY";
         }
 
-        log("Initialization complete: primaryHooks=" + primaryHooks
+        log("Initialization complete: resolver=exact"
+                + ", primaryHooks=" + primaryHooks
                 + ", secondaryHooks=" + secondaryHooks
                 + ", tertiaryHooks=" + tertiaryHooks
                 + ", enforcement=" + mode
                 + ", persistence=NOT_REQUIRED"
                 + ", normalPostLogging=OFF"
-                + ", dexScan=0, globalViewHooks=0, deoptimized=0");
+                + ", dexKit=0, globalViewHooks=0, deoptimized=0");
     }
 
-    private static int installBoundaryHooks(
+    static void installAdaptive(
+            CompatibilityProfile.DetectedVersion detectedVersion,
+            AdaptiveHookResolver.Resolution resolution
+    ) {
+        if (!INSTALLED.compareAndSet(false, true)) {
+            return;
+        }
+        if (resolution == null || resolution.method == null) {
+            log("Initialization complete: resolver=adaptive"
+                    + ", enforcement=FAIL_OPEN_NO_BOUNDARY"
+                    + ", reason=" + (resolution == null ? "null-resolution" : resolution.reason));
+            return;
+        }
+
+        final String boundary = "adaptive-"
+                + simpleName(resolution.method.getDeclaringClass().getName())
+                + "." + resolution.method.getName();
+        boolean installed = installResolvedBoundary(
+                resolution.method,
+                boundary,
+                null,
+                false
+        );
+        log("Initialization complete: resolver=adaptive"
+                + ", X=" + detectedVersion.displayName()
+                + ", boundary=" + resolution.method
+                + ", score=" + resolution.score
+                + ", source=" + resolution.source
+                + ", cacheHit=" + resolution.cacheHit
+                + ", candidateCount=" + resolution.candidateCount
+                + ", enforcement=" + (installed ? "ACTIVE_ADAPTIVE" : "FAIL_OPEN_HOOK_ERROR")
+                + ", directSignalsOnly=true"
+                + ", globalViewHooks=0, deoptimized=0");
+    }
+
+    private static int installExactBoundaryHooks(
             ClassLoader classLoader,
             Class<?> postInterface,
             final CompatibilityProfile.Profile profile,
@@ -117,34 +151,15 @@ public final class TwitterAdBlocker {
 
         int installed = 0;
         for (final Method method : type.getDeclaredMethods()) {
-            if (!isRenderBoundary(method, postInterface, profile, methodName)) {
+            if (!isExactRenderBoundary(method, postInterface, profile, methodName)) {
                 continue;
             }
-
-            if (hookMemberOnce(method, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (param.args == null || param.args.length == 0) {
-                        return;
-                    }
-                    Object postModel = param.args[0];
-                    if (postModel == null) {
-                        return;
-                    }
-
-                    BundledAdPatterns.Classification classification =
-                            BundledAdPatterns.classifyTimelinePost(
-                                    postModel,
-                                    profile.expectedRenderModel
-                            );
-                    if (!classification.promoted) {
-                        return;
-                    }
-
-                    param.setResult(null);
-                    recordBlock(boundary, postModel, classification);
-                }
-            })) {
+            if (installResolvedBoundary(
+                    method,
+                    boundary,
+                    profile.expectedRenderModel,
+                    true
+            )) {
                 installed++;
                 log("Installed pre-render boundary [" + boundary + "]: " + method);
             }
@@ -152,7 +167,40 @@ public final class TwitterAdBlocker {
         return installed;
     }
 
-    private static boolean isRenderBoundary(
+    private static boolean installResolvedBoundary(
+            final Method method,
+            final String boundary,
+            final String expectedRenderModel,
+            final boolean allowActionFallback
+    ) {
+        return hookMemberOnce(method, new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args == null || param.args.length == 0) {
+                    return;
+                }
+                Object postModel = param.args[0];
+                if (postModel == null) {
+                    return;
+                }
+
+                BundledAdPatterns.Classification classification =
+                        BundledAdPatterns.classifyTimelinePost(
+                                postModel,
+                                expectedRenderModel,
+                                allowActionFallback
+                        );
+                if (!classification.promoted) {
+                    return;
+                }
+
+                param.setResult(null);
+                recordBlock(boundary, postModel, classification);
+            }
+        });
+    }
+
+    private static boolean isExactRenderBoundary(
             Method method,
             Class<?> postInterface,
             CompatibilityProfile.Profile profile,
