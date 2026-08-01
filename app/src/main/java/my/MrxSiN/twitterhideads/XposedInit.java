@@ -1,5 +1,7 @@
 package my.MrxSiN.twitterhideads;
 
+import android.content.Context;
+
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -12,7 +14,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /** LSPosed entry point. Scope the module only to com.twitter.android. */
 public final class XposedInit implements IXposedHookLoadPackage {
     private static final String TAG = "TwitterHideAds";
-    private static final String MODULE_VERSION = "1.1.0";
+    private static final String MODULE_VERSION = "1.2.6-test-app-icon";
 
     private static final AtomicBoolean ATTACH_HOOK_INSTALLED =
             new AtomicBoolean(false);
@@ -53,29 +55,51 @@ public final class XposedInit implements IXposedHookLoadPackage {
                         return;
                     }
 
-                    Object context = param.args != null && param.args.length > 0
+                    Object rawContext = param.args != null && param.args.length > 0
                             ? param.args[0]
                             : null;
+                    Context context = rawContext instanceof Context
+                            ? (Context) rawContext
+                            : null;
                     CompatibilityProfile.DetectedVersion detected =
-                            CompatibilityProfile.detect(context);
-                    CompatibilityProfile.Profile profile =
-                            CompatibilityProfile.select(detected);
+                            CompatibilityProfile.detect(rawContext);
+                    CompatibilityProfile.Profile exact =
+                            CompatibilityProfile.selectExact(detected);
 
                     log("Detected X version=" + detected.displayName()
                             + ", versionCode=" + detected.displayCode()
-                            + ", selectedProfile="
-                            + (profile == null ? "none" : profile.id));
+                            + ", exactProfile="
+                            + (exact == null ? "none" : exact.id)
+                            + ", adaptiveResolver=ENABLED");
 
-                    if (profile == null) {
-                        log("Unsupported or unknown X version; fail-open mode active. "
-                                + "No render hooks installed.");
-                        return;
+                    try {
+                        if (exact != null) {
+                            TwitterAdBlocker.installExact(lpparam, detected, exact);
+                        } else {
+                            log("No exact profile; starting adaptive structural resolution");
+                            AdaptiveHookResolver.Resolution resolution =
+                                    AdaptiveHookResolver.resolve(
+                                            context,
+                                            lpparam.classLoader,
+                                            detected
+                                    );
+                            TwitterAdBlocker.installAdaptive(detected, resolution);
+                        }
+                    } catch (Throwable throwable) {
+                        log("Timeline blocker initialization failed; fail-open mode active");
+                        XposedBridge.log(throwable);
                     }
 
                     try {
-                        TwitterAdBlocker.install(lpparam, detected, profile);
+                        VideoDatasetResolver.Resolution videoResolution =
+                                VideoDatasetResolver.resolve(
+                                        context,
+                                        lpparam.classLoader,
+                                        detected
+                                );
+                        VideoDatasetFilter.install(videoResolution);
                     } catch (Throwable throwable) {
-                        log("Fatal initialization failure");
+                        log("Video dataset filter failed; timeline blocker remains active");
                         XposedBridge.log(throwable);
                     }
                 }

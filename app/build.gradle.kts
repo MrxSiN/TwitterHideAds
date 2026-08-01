@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
 }
 
-val appVersion = "1.1.0"
+val appVersion = "1.2.6-test-app-icon"
 
 android {
     namespace = "my.MrxSiN.twitterhideads"
@@ -12,7 +12,7 @@ android {
         applicationId = "my.MrxSiN.twitterhideads"
         minSdk = 24
         targetSdk = 36
-        versionCode = 22
+        versionCode = 29
         versionName = appVersion
     }
 
@@ -23,6 +23,9 @@ android {
     }
 
     packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += setOf(
                 "META-INF/AL2.0",
@@ -49,4 +52,5 @@ androidComponents {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+    implementation("org.luckypray:dexkit:2.2.0")
 }
