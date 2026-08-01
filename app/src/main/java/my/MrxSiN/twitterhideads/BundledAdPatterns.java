@@ -27,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * advertiser or post IDs are required.
  */
 final class BundledAdPatterns {
-    static final String SCHEMA_VERSION = "5";
+    static final String SCHEMA_VERSION = "6";
     static final String PROMOTED_METADATA_CLASS =
             "com.x.models.TimelinePromotedMetadata";
     static final String ACTION_ENUM_CLASS = "com.x.models.PostActionType";
@@ -54,7 +54,8 @@ final class BundledAdPatterns {
 
     static Classification classifyTimelinePost(
             Object model,
-            String expectedRenderModel
+            String expectedRenderModel,
+            boolean allowActionFallback
     ) {
         if (model == null) {
             return Classification.NORMAL;
@@ -85,20 +86,12 @@ final class BundledAdPatterns {
             }
         }
 
-        for (Field field : access.metadataFields) {
+        for (Field field : access.objectFields) {
             Object value = read(field, model);
             if (isPromotedMetadata(value)) {
                 promotedMetadata = true;
                 break;
             }
-        }
-
-        // Obfuscated builds may declare the metadata field as Object. The exact
-        // X 12.7.1 field is named "m", so inspect that cached field as well.
-        if (!promotedMetadata && access.obfuscatedMetadataField != null) {
-            promotedMetadata = isPromotedMetadata(
-                    read(access.obfuscatedMetadataField, model)
-            );
         }
 
         if (promotedEntry || promotedMetadata) {
@@ -116,6 +109,15 @@ final class BundledAdPatterns {
         // walk for every normal timeline item on supported X versions.
         if (expectedRenderModel != null
                 && expectedRenderModel.equals(model.getClass().getName())) {
+            return new Classification(
+                    false,
+                    entryId,
+                    Collections.<String>emptySet(),
+                    false
+            );
+        }
+
+        if (!allowActionFallback) {
             return new Classification(
                     false,
                     entryId,
@@ -351,23 +353,19 @@ final class BundledAdPatterns {
 
     private static final class DirectAccess {
         final List<Field> stringFields;
-        final List<Field> metadataFields;
-        final Field obfuscatedMetadataField;
+        final List<Field> objectFields;
 
         DirectAccess(
                 List<Field> stringFields,
-                List<Field> metadataFields,
-                Field obfuscatedMetadataField
+                List<Field> objectFields
         ) {
             this.stringFields = stringFields;
-            this.metadataFields = metadataFields;
-            this.obfuscatedMetadataField = obfuscatedMetadataField;
+            this.objectFields = objectFields;
         }
 
         static DirectAccess resolve(Class<?> type) {
             ArrayList<Field> strings = new ArrayList<>();
-            ArrayList<Field> metadata = new ArrayList<>();
-            Field obfuscatedMetadata = null;
+            ArrayList<Field> objects = new ArrayList<>();
 
             for (Field field : allFields(type)) {
                 if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
@@ -384,21 +382,16 @@ final class BundledAdPatterns {
                         || declared == String.class) {
                     strings.add(field);
                 }
-                if (PROMOTED_METADATA_CLASS.equals(declared.getName())
-                        || declared.getName().contains("PromotedMetadata")) {
-                    metadata.add(field);
-                }
-                if ("m".equals(field.getName())) {
-                    obfuscatedMetadata = field;
+                if (!declared.isPrimitive()) {
+                    objects.add(field);
                 }
             }
 
-            // Prefer the known obfuscated entry field first, then semantic fields.
             strings.sort((left, right) -> fieldPriority(left) - fieldPriority(right));
+            objects.sort((left, right) -> objectFieldPriority(left) - objectFieldPriority(right));
             return new DirectAccess(
                     Collections.unmodifiableList(strings),
-                    Collections.unmodifiableList(metadata),
-                    obfuscatedMetadata
+                    Collections.unmodifiableList(objects)
             );
         }
 
@@ -407,6 +400,18 @@ final class BundledAdPatterns {
                 return 0;
             }
             if (field.getName().toLowerCase(Locale.ROOT).contains("entry")) {
+                return 1;
+            }
+            return 2;
+        }
+
+        private static int objectFieldPriority(Field field) {
+            String typeName = field.getType().getName();
+            if (PROMOTED_METADATA_CLASS.equals(typeName)
+                    || typeName.contains("PromotedMetadata")) {
+                return 0;
+            }
+            if ("m".equals(field.getName())) {
                 return 1;
             }
             return 2;

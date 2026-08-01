@@ -1,128 +1,102 @@
 # Twitter Hide Ads
 
-Twitter Hide Ads is an LSPosed module that removes promoted posts from the X Android timeline before the app's Compose renderer draws them.
+An LSPosed module that suppresses promoted posts in the X Android Home timeline and filters promoted videos from the full-screen Video Tab before pager creation.
 
-## Release
-
-- Module version: `1.1.0`
-- Android version code: `22`
-- Module package: `my.MrxSiN.twitterhideads`
-- LSPosed scope: `com.twitter.android`
-- Supported X versions:
-  - `12.7.1` and suffix builds such as `12.7.1-release.0`
-  - `12.8.0` and suffix builds such as `12.8.0-release.0`
-
-## Features
-
-- Removes promoted timeline posts before Compose rendering.
-- Uses direct promoted-post signals rather than advertiser lists or post position.
-- Supports separate hook profiles for X 12.7.1 and X 12.8.0.
-- Keeps normal posts on the original rendering path.
-- Fails open when the installed X version or hook boundary is unsupported.
-- Uses no network access, database, DEX scan, global View hooks, or deoptimization.
-
-## How it works
-
-The module selects a compatibility profile from the installed X version and hooks an exact `void` Compose post-render method. Before the original method executes, the first post model is classified as promoted when either:
-
-- its entry ID begins with `promoted-`; or
-- its direct `TimelinePromotedMetadata` field is non-null.
-
-A promoted post is suppressed with `param.setResult(null)`. Normal posts continue into the original X renderer.
-
-### X 12.7.1 profile
-
-- Render model: `com.x.urt.items.post.a6$a`
-- Primary boundary: `com.x.urt.items.post.c7.e(...)`
-- Fallback boundaries:
-  - `com.x.urt.items.post.e.a(...)`
-  - `com.x.urt.items.post.c7.a(...)`
-
-### X 12.8.0 profile
-
-- Render model: `com.x.urt.items.post.w5$a`
-- Primary boundary: `com.x.urt.items.post.d7.e(...)`
-- Fallback boundaries:
-  - `com.x.urt.items.post.e.a(...)`
-  - `com.x.urt.items.post.d7.a(...)`
-
-Fallbacks are installed only when the corresponding primary boundary cannot be installed.
-
-## Installation
-
-1. Install the release APK.
-2. Enable **Twitter Hide Ads** in LSPosed.
-3. Select only the X app (`com.twitter.android`) as its scope.
-4. Force-stop X and open it again.
-
-Expected startup log on X 12.8.0:
+## Active dataset-filter test build
 
 ```text
-Twitter Hide Ads v1.1.0: loading in com.twitter.android
-[TwitterHideAds] Detected X version=12.8.0-release.0, versionCode=..., selectedProfile=x-12.8.0
-[TwitterHideAds] Installed pre-render boundary [primary-d7.e]: ...
-[TwitterHideAds] Initialization complete: primaryHooks=1, ... enforcement=ACTIVE_PRIMARY
+versionName: 1.2.6-test-app-icon
+versionCode: 29
 ```
 
-Expected block log:
+The existing adaptive Home timeline blocker is unchanged. The video implementation has been rebuilt around one upstream data hook rather than renderer, autoplay or player hooks.
+
+## Current behavior
 
 ```text
-[TwitterHideAds] Blocked promoted post before Compose: boundary=primary-d7.e, entryId=promoted-tweet-..., signals=[entryId:promoted-, TimelinePromotedMetadata]
+Home timeline ads: ACTIVE adaptive blocking
+Video Tab ads:    ACTIVE upstream dataset filtering
 ```
 
-## Compatibility behavior
+## Video strategy
 
-The hook mappings use obfuscated X classes and may change after an X update. Unsupported versions do not receive a guessed hook. The module logs `FAIL_OPEN_NO_BOUNDARY` or an unsupported-version message and leaves the X timeline unchanged.
+The resolver dynamically identifies the URT state-copy method that receives the Video Tab's mixed Kotlin immutable list. The runtime hook activates only when:
+
+- the caller stack contains `com.x.video.tab.*`;
+- the list contains multiple direct timeline-post items;
+- at least one normal `tweet-*` item is present;
+- at least one `promoted-*` item or non-null `TimelinePromotedMetadata` is present.
+
+A compatible immutable copy is created with promoted posts removed. Cursor and paging-control entries are preserved.
+
+```text
+Video feed batch
+→ remove promoted UrtTimelinePost entries
+→ pager receives normal videos and paging entries
+→ promoted playback is never created
+```
+
+## Hook footprint
+
+```text
+Video dataset hooks: 1
+Compose hooks:       0
+Autoplay hooks:      0
+Playback hooks:      0
+Player hooks:        0
+Dynamic caller hooks: 0
+```
+
+The resolved method descriptor is cached using the X version and APK fingerprint. A renamed method is rescanned after an X update.
+
+## Expected log
+
+```text
+Video dataset resolver selected: ...
+Video dataset filter initialized: ... installedHooks=1
+Filtered promoted videos before pager creation: originalSize=13, filteredSize=11, removed=2
+```
+
+If a compatible immutable copy cannot be created or verified, the video filter fails open and leaves the original batch unchanged.
+
+## Test procedure
+
+1. Install the APK over the previous test build.
+2. Enable it for `com.twitter.android` in LSPosed.
+3. Force-stop X and reopen it.
+4. Confirm Home timeline advertisements remain blocked.
+5. Open the full-screen Video Tab.
+6. Scroll through at least 20 videos.
+7. Confirm advertisements are skipped completely, with no blank page or continuing audio.
+8. Check that normal swiping and playback remain smooth.
+9. Export the LSPosed log.
 
 ## Build
 
-Requirements:
-
-- JDK 17
-- Android SDK Platform 36
-- Gradle wrapper included in the repository
-
 ```bash
-./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew clean assembleRelease
 ```
 
-Generated APK names include the module version:
+APK output:
 
 ```text
-TwitterHideAds-v1.1.0.apk
+app/build/outputs/apk/release/TwitterHideAds-v1.2.6-test-app-icon.apk
 ```
 
-## GitHub Actions release
+Required GitHub repository secrets:
 
-The included workflow follows the release process used by ThreadsHideAds:
-
-1. Build the unsigned release APK with Gradle.
-2. Sign it using `r0adkll/sign-android-release@v1`.
-3. Attach the signed APK to the tagged GitHub release.
-
-Required repository secrets:
-
-- `SIGNING_KEY`
-- `ALIAS`
-- `STORE_PASSWORD`
-- `KEY_PASSWORD`
-- `TOKEN`
-
-Create and push a tag matching the app version:
-
-```bash
-git tag v1.1.0
-git push origin v1.1.0
+```text
+SIGNING_KEY
+ALIAS
+STORE_PASSWORD
+KEY_PASSWORD
+TOKEN
 ```
 
-## Privacy and scope
+## Disclaimer
 
-- No network permission or outbound requests.
-- No collection of account, post, advertiser, or analytics data.
-- No persistent storage.
-- No modification outside `com.twitter.android`.
+This project is independent and is not affiliated with X Corp., Twitter, LSPosed or DexKit. Internal X structures can change without notice.
 
-## License
+## App icon
 
-See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+Includes a custom launcher icon representing X ad blocking, with legacy density assets, round icons, an Android adaptive icon, and an Android 13 monochrome themed icon. The source artwork is stored in `artwork/twitter_hide_ads_icon_master.png`.

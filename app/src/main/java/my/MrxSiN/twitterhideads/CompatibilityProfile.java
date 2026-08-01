@@ -2,7 +2,7 @@ package my.MrxSiN.twitterhideads;
 
 import de.robv.android.xposed.XposedHelpers;
 
-/** Exact render-hook mappings validated for supported X releases. */
+/** Exact render-hook mappings retained as a zero-scan fast path. */
 final class CompatibilityProfile {
     static final String TARGET_PACKAGE = "com.twitter.android";
 
@@ -70,7 +70,11 @@ final class CompatibilityProfile {
         }
     }
 
-    static Profile select(DetectedVersion version) {
+    /**
+     * X 12.9.1 is intentionally excluded in this adaptive test build. The
+     * resolver must rediscover its renamed boundary without using s6.e.
+     */
+    static Profile selectExact(DetectedVersion version) {
         if (version == null || version.versionName == null) {
             return null;
         }
