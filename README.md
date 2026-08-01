@@ -71,32 +71,6 @@ If a compatible immutable copy cannot be created or verified, the video filter f
 8. Check that normal swiping and playback remain smooth.
 9. Export the LSPosed log.
 
-## Build
-
-```bash
-./gradlew clean assembleRelease
-```
-
-APK output:
-
-```text
-app/build/outputs/apk/release/TwitterHideAds-v1.2.6-test-app-icon.apk
-```
-
-Required GitHub repository secrets:
-
-```text
-SIGNING_KEY
-ALIAS
-STORE_PASSWORD
-KEY_PASSWORD
-TOKEN
-```
-
 ## Disclaimer
 
 This project is independent and is not affiliated with X Corp., Twitter, LSPosed or DexKit. Internal X structures can change without notice.
-
-## App icon
-
-Includes a custom launcher icon representing X ad blocking, with legacy density assets, round icons, an Android adaptive icon, and an Android 13 monochrome themed icon. The source artwork is stored in `artwork/twitter_hide_ads_icon_master.png`.
