@@ -20,7 +20,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Hide promoted posts in supported X versions before Compose rendering" />
+            android:value="Adaptively hide promoted posts before Compose rendering" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />

@@ -1,35 +1,48 @@
 {
-  "schemaVersion": 5,
-  "moduleVersion": "1.1.0",
-  "releaseChannel": "stable",
+  "schemaVersion": 7,
+  "moduleVersion": "1.2.6-test-app-icon",
+  "releaseChannel": "test",
   "targetPackage": "com.twitter.android",
-  "supportedProfiles": [
+  "exactProfiles": [
     {
-      "xVersion": "12.7.1",
+      "xVersionPrefix": "12.7.1",
+      "postInterface": "com.x.urt.items.post.a6",
       "renderModel": "com.x.urt.items.post.a6$a",
       "primaryBoundary": "com.x.urt.items.post.c7.e"
     },
     {
-      "xVersion": "12.8.0",
+      "xVersionPrefix": "12.8.0",
+      "postInterface": "com.x.urt.items.post.w5",
       "renderModel": "com.x.urt.items.post.w5$a",
       "primaryBoundary": "com.x.urt.items.post.d7.e"
     }
   ],
+  "adaptiveResolver": {
+    "dexKitVersion": "2.2.0",
+    "searchPackage": "com.x.urt.items.post",
+    "activeThreshold": 320,
+    "minimumWinnerMargin": 25,
+    "cache": "target-private SharedPreferences keyed by X version and APK fingerprint",
+    "fallback": "bounded DexFile reflection scan",
+    "failOpenOnAmbiguity": true
+  },
   "strongSignals": [
-    "entry ID starts with promoted-",
-    "direct TimelinePromotedMetadata field is non-null"
+    "any direct String field starts with promoted-",
+    "any direct object field has runtime class com.x.models.TimelinePromotedMetadata"
   ],
-  "fallbackSignals": [
-    "PostActionType.PromotedDismissAd",
-    "PostActionType.PromotedAdsInfo",
-    "PostActionType.PromotedReportAd"
-  ],
-  "runtimePolicy": {
-    "enforcement": "block before Compose",
-    "postSuppression": true,
-    "failOpenOnUnsupportedVersion": true,
-    "dexScan": false,
-    "globalViewHooks": false,
-    "deoptimization": false
+  "videoDatasetFilter": {
+    "enforcement": "active-test",
+    "resolver": "single structural pre-pager URT state-copy method",
+    "runtimeScope": "caller stack must include com.x.video.tab",
+    "input": "mixed Kotlin immutable list containing normal and promoted UrtTimelinePost items",
+    "action": "replace argument with same-interface filtered immutable copy",
+    "cache": "X version and APK fingerprint",
+    "installedHooks": 1,
+    "composeHooks": 0,
+    "autoplayHooks": 0,
+    "playbackHooks": 0,
+    "playerHooks": 0,
+    "dynamicCallerHooks": 0,
+    "failOpenOnCopyFailure": true
   }
 }
