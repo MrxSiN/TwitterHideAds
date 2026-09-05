@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Twitter Hide Ads</string>
+    <string name="module_description">Adaptively hide promoted posts before Compose rendering</string>
 </resources>

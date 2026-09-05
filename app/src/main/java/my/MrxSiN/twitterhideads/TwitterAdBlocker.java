@@ -1,23 +1,19 @@
 package my.MrxSiN.twitterhideads;
 
-import java.lang.reflect.Member;
+import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedInterface;
 
 /** Exact and adaptively resolved pre-render promoted-post suppression. */
 public final class TwitterAdBlocker {
-    private static final String TAG = "TwitterHideAds";
-
     private static final int DETAILED_BLOCK_LOG_LIMIT = 3;
     private static final int PERIODIC_LOG_INTERVAL = 50;
 
@@ -38,7 +34,7 @@ public final class TwitterAdBlocker {
     }
 
     static void installExact(
-            XC_LoadPackage.LoadPackageParam lpparam,
+            ClassLoader classLoader,
             CompatibilityProfile.DetectedVersion detectedVersion,
             CompatibilityProfile.Profile profile
     ) {
@@ -51,13 +47,13 @@ public final class TwitterAdBlocker {
                 + ", classifierSchema=" + BundledAdPatterns.SCHEMA_VERSION
                 + ", renderModel=" + profile.expectedRenderModel);
 
-        Class<?> postInterface = XposedHelpers.findClassIfExists(
+        Class<?> postInterface = Reflect.findClassIfExists(
                 profile.postInterface,
-                lpparam.classLoader
+                classLoader
         );
 
         int primaryHooks = installExactBoundaryHooks(
-                lpparam.classLoader,
+                classLoader,
                 postInterface,
                 profile,
                 profile.primaryClass,
@@ -72,7 +68,7 @@ public final class TwitterAdBlocker {
 
         if (primaryHooks == 0) {
             secondaryHooks = installExactBoundaryHooks(
-                    lpparam.classLoader,
+                    classLoader,
                     postInterface,
                     profile,
                     profile.secondaryClass,
@@ -81,7 +77,7 @@ public final class TwitterAdBlocker {
                             + "." + profile.secondaryMethod
             );
             tertiaryHooks = installExactBoundaryHooks(
-                    lpparam.classLoader,
+                    classLoader,
                     postInterface,
                     profile,
                     profile.tertiaryClass,
@@ -130,7 +126,7 @@ public final class TwitterAdBlocker {
             installed++;
             // ART inlines these composables into their callers, which would
             // otherwise keep running the compiled copy past the hook.
-            if (Deoptimizer.deoptimize(method)) {
+            if (ModuleRuntime.deoptimize(method)) {
                 deoptimized++;
             }
             log("Installed pre-render boundary [" + boundary + "]: " + method);
@@ -144,7 +140,7 @@ public final class TwitterAdBlocker {
                 + ", cacheHit=" + resolution.cacheHit
                 + ", candidateCount=" + resolution.candidateCount
                 + ", enforcement=" + (installed > 0 ? "ACTIVE_ADAPTIVE" : "FAIL_OPEN_HOOK_ERROR")
-                + ", deoptimizeSupported=" + Deoptimizer.isSupported()
+                + ", deoptimizeSupported=" + ModuleRuntime.isAttached()
                 + ", deoptimized=" + deoptimized);
     }
 
@@ -156,7 +152,7 @@ public final class TwitterAdBlocker {
             String methodName,
             final String boundary
     ) {
-        Class<?> type = XposedHelpers.findClassIfExists(className, classLoader);
+        Class<?> type = Reflect.findClassIfExists(className, classLoader);
         if (type == null) {
             log("Render boundary class not found: " + className);
             return 0;
@@ -180,37 +176,38 @@ public final class TwitterAdBlocker {
         return installed;
     }
 
+    /**
+     * A promoted post is suppressed by returning without calling
+     * {@link XposedInterface.Chain#proceed()}, which is how the modern API
+     * declines to run the original void render call. Normal posts proceed
+     * untouched.
+     */
     private static boolean installResolvedBoundary(
             final Method method,
             final String boundary,
             final String expectedRenderModel,
             final boolean allowActionFallback
     ) {
-        return hookMemberOnce(method, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                if (param.args == null || param.args.length == 0) {
-                    return;
-                }
-                Object postModel = param.args[0];
-                if (postModel == null) {
-                    return;
-                }
-
-                BundledAdPatterns.Classification classification =
-                        BundledAdPatterns.classifyTimelinePost(
-                                postModel,
-                                expectedRenderModel,
-                                allowActionFallback
-                        );
-                logBoundaryObservation(boundary, postModel, classification);
-                if (!classification.promoted) {
-                    return;
-                }
-
-                param.setResult(null);
-                recordBlock(boundary, postModel, classification);
+        return hookMemberOnce(method, chain -> {
+            List<Object> args = chain.getArgs();
+            Object postModel = args.isEmpty() ? null : args.get(0);
+            if (postModel == null) {
+                return chain.proceed();
             }
+
+            BundledAdPatterns.Classification classification =
+                    BundledAdPatterns.classifyTimelinePost(
+                            postModel,
+                            expectedRenderModel,
+                            allowActionFallback
+                    );
+            logBoundaryObservation(boundary, postModel, classification);
+            if (!classification.promoted) {
+                return chain.proceed();
+            }
+
+            recordBlock(boundary, postModel, classification);
+            return null;
         });
     }
 
@@ -309,20 +306,24 @@ public final class TwitterAdBlocker {
         }
     }
 
-    private static boolean hookMemberOnce(Member member, XC_MethodHook hook) {
+    private static boolean hookMemberOnce(
+            Executable member,
+            XposedInterface.Hooker hooker
+    ) {
         String key = member.getDeclaringClass().getName() + "#" + member;
         if (!HOOKED_MEMBERS.add(key)) {
             return false;
         }
         try {
-            if (member instanceof Method) {
-                ((Method) member).setAccessible(true);
+            if (ModuleRuntime.hook(member, hooker) == null) {
+                HOOKED_MEMBERS.remove(key);
+                log("Hook failed for " + member + ": framework interface unavailable");
+                return false;
             }
-            XposedBridge.hookMethod(member, hook);
             return true;
         } catch (Throwable throwable) {
             HOOKED_MEMBERS.remove(key);
-            log("Hook failed for " + member + ": " + describeThrowable(throwable));
+            log("Hook failed for " + member + ": " + Reflect.describeThrowable(throwable));
             return false;
         }
     }
@@ -339,13 +340,7 @@ public final class TwitterAdBlocker {
         return entryId.length() > 96 ? entryId.substring(0, 96) : entryId;
     }
 
-    private static String describeThrowable(Throwable throwable) {
-        String message = throwable.getMessage();
-        return throwable.getClass().getSimpleName()
-                + (message == null ? "" : ": " + message);
-    }
-
     private static void log(String message) {
-        XposedBridge.log("[" + TAG + "] " + message);
+        ModuleRuntime.log(message);
     }
 }

@@ -2,6 +2,18 @@
 
 All notable changes to Twitter Hide Ads are documented here.
 
+## 2.0.0 - 2026-09-06
+
+- Migrated the module from the legacy `de.robv.android.xposed` API 82 to the modern libxposed API `102.0.0`, as implemented by [Vector](https://github.com/JingMatrix/Vector). Frameworks that only implement the legacy API can no longer load the module.
+- Replaced the `IXposedHookLoadPackage` entry point with `ModuleMain extends XposedModule`, declared through `META-INF/xposed/java_init.list`, with `module.prop` and `scope.list` replacing the `xposedmodule`, `xposedminversion` and `xposedscope` manifest metadata and the `assets/xposed_init` entry.
+- Replaced `XposedBridge.hookMethod` callbacks with interceptor-chain hookers: a promoted post is now suppressed by returning without calling `chain.proceed()`, and the Video Tab filter proceeds with a rebuilt argument array instead of mutating the original one.
+- Replaced the reflective `XposedBridge.deoptimizeMethod` lookup with `XposedInterface.deoptimize`, and `XposedHelpers` with plain reflection in `Reflect` and the platform `PackageManager` APIs.
+- Routed framework access through `ModuleRuntime`, which holds the `XposedInterface` attached to the module entry and carries logging, hooking and deoptimization.
+- Raised `minSdk` from 24 to 26, which the modern API requires, and the Java source and target level from 11 to 17.
+- Split `AdaptiveHookResolver` into candidate discovery (`BoundaryCandidateSource`), persistence (`AdaptiveBoundaryCache`) and ranking, and moved the action-graph fallback out of `BundledAdPatterns` into `PromotedActionScanner`. No file exceeds 400 lines and no function exceeds 80.
+- Documented rootless installation through LSPatch, which embeds Vector into a patched APK and loads modern libxposed modules through the same runtime.
+- Increased Android `versionCode` from `30` to `31`.
+
 ## 1.3.0 - 2026-09-05
 
 - Restored Home timeline suppression on X `12.22.0-prod.01`, which had been failing open since X restructured its render boundaries.
