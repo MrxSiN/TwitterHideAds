@@ -14,7 +14,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /** LSPosed entry point. Scope the module only to com.twitter.android. */
 public final class XposedInit implements IXposedHookLoadPackage {
     private static final String TAG = "TwitterHideAds";
-    private static final String MODULE_VERSION = "1.2.6-test-app-icon";
+    private static final String MODULE_VERSION = "1.3.0";
 
     private static final AtomicBoolean ATTACH_HOOK_INSTALLED =
             new AtomicBoolean(false);

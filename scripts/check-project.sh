@@ -17,13 +17,13 @@ for file in "$APP_GRADLE" "$WORKFLOW" "$INIT" "$BLOCKER" "$RESOLVER" \
   test -f "$file"
 done
 
-grep -q 'val appVersion = "1.2.6-test-app-icon"' "$APP_GRADLE"
-grep -q 'versionCode = 29' "$APP_GRADLE"
+grep -q 'val appVersion = "1.3.0"' "$APP_GRADLE"
+grep -q 'versionCode = 30' "$APP_GRADLE"
 grep -q 'implementation("org.luckypray:dexkit:2.2.0")' "$APP_GRADLE"
 grep -q 'r0adkll/sign-android-release@v1' "$WORKFLOW"
 ! grep -q 'signingConfigs' "$APP_GRADLE"
 
-grep -q 'MODULE_VERSION = "1.2.6-test-app-icon"' "$INIT"
+grep -q 'MODULE_VERSION = "1.3.0"' "$INIT"
 grep -q 'VideoDatasetResolver.resolve' "$INIT"
 grep -q 'VideoDatasetFilter.install' "$INIT"
 grep -q 'installedHooks=1' "$VIDEO_FILTER"
@@ -42,7 +42,7 @@ grep -q 'promotedCount != 0' "$VIDEO_FILTER"
 ! grep -q 'com.x.media.autoplay' "$VIDEO_FILTER"
 ! grep -q 'com.x.media.playback' "$VIDEO_FILTER"
 
-grep -q '"moduleVersion": "1.2.6-test-app-icon"' "$PATTERN_JSON"
+grep -q '"moduleVersion": "1.3.0"' "$PATTERN_JSON"
 grep -q '"installedHooks": 1' "$PATTERN_JSON"
 grep -q '"composeHooks": 0' "$PATTERN_JSON"
 grep -q '"playbackHooks": 0' "$PATTERN_JSON"

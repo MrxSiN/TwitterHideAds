@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
 }
 
-val appVersion = "1.2.6-test-app-icon"
+val appVersion = "1.3.0"
 
 android {
     namespace = "my.MrxSiN.twitterhideads"
@@ -12,7 +12,7 @@ android {
         applicationId = "my.MrxSiN.twitterhideads"
         minSdk = 24
         targetSdk = 36
-        versionCode = 29
+        versionCode = 30
         versionName = appVersion
     }
 
@@ -24,7 +24,7 @@ android {
 
     packaging {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
         resources {
             excludes += setOf(
