@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
 }
 
-val appVersion = "1.3.0"
+val appVersion = "2.0.0"
 
 android {
     namespace = "my.MrxSiN.twitterhideads"
@@ -10,15 +10,16 @@ android {
 
     defaultConfig {
         applicationId = "my.MrxSiN.twitterhideads"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 36
-        versionCode = 30
+        versionCode = 31
         versionName = appVersion
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            proguardFiles("proguard-rules.pro")
         }
     }
 
@@ -27,6 +28,7 @@ android {
             useLegacyPackaging = false
         }
         resources {
+            merges += "META-INF/xposed/*"
             excludes += setOf(
                 "META-INF/AL2.0",
                 "META-INF/LGPL2.1",
@@ -37,8 +39,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 }
 
@@ -51,6 +53,6 @@ androidComponents {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    compileOnly("io.github.libxposed:api:102.0.0")
     implementation("org.luckypray:dexkit:2.2.0")
 }

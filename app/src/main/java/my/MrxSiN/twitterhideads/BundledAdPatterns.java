@@ -1,17 +1,12 @@
 package my.MrxSiN.twitterhideads;
 
-import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -23,31 +18,16 @@ import java.util.concurrent.ConcurrentHashMap;
  *  - a direct com.x.models.TimelinePromotedMetadata field.
  *
  * The promoted PostActionType values discovered by the menu probes are retained
- * as a compatibility fallback for an unfamiliar model shape. No user-specific
- * advertiser or post IDs are required.
+ * in {@link PromotedActionScanner} as a compatibility fallback for an unfamiliar
+ * model shape. No user-specific advertiser or post IDs are required.
  */
 final class BundledAdPatterns {
     static final String SCHEMA_VERSION = "6";
     static final String PROMOTED_METADATA_CLASS =
             "com.x.models.TimelinePromotedMetadata";
-    static final String ACTION_ENUM_CLASS = "com.x.models.PostActionType";
-
-    static final Set<String> PROMOTED_ACTIONS;
 
     private static final ConcurrentHashMap<Class<?>, DirectAccess> DIRECT_ACCESS =
             new ConcurrentHashMap<>();
-
-    private static final int ACTION_MAX_DEPTH = 5;
-    private static final int ACTION_MAX_OBJECTS = 160;
-    private static final int ACTION_MAX_COLLECTION_ITEMS = 24;
-
-    static {
-        LinkedHashSet<String> actions = new LinkedHashSet<>();
-        actions.add("PromotedDismissAd");
-        actions.add("PromotedAdsInfo");
-        actions.add("PromotedReportAd");
-        PROMOTED_ACTIONS = Collections.unmodifiableSet(actions);
-    }
 
     private BundledAdPatterns() {
     }
@@ -71,7 +51,7 @@ final class BundledAdPatterns {
         boolean promotedMetadata = false;
 
         for (Field field : access.stringFields) {
-            Object value = read(field, model);
+            Object value = Reflect.read(field, model);
             if (!(value instanceof CharSequence)) {
                 continue;
             }
@@ -87,7 +67,7 @@ final class BundledAdPatterns {
         }
 
         for (Field field : access.objectFields) {
-            Object value = read(field, model);
+            Object value = Reflect.read(field, model);
             if (isPromotedMetadata(value)) {
                 promotedMetadata = true;
                 break;
@@ -126,7 +106,7 @@ final class BundledAdPatterns {
             );
         }
 
-        ActionMatch actionMatch = inspectPromotedActions(model);
+        PromotedActionScanner.Match actionMatch = PromotedActionScanner.inspect(model);
         if (actionMatch.promoted) {
             return new Classification(
                     true,
@@ -142,114 +122,6 @@ final class BundledAdPatterns {
                 Collections.<String>emptySet(),
                 actionMatch.used
         );
-    }
-
-    private static ActionMatch inspectPromotedActions(Object root) {
-        if (root == null) {
-            return ActionMatch.NOT_USED;
-        }
-
-        ArrayDeque<Node> queue = new ArrayDeque<>();
-        IdentityHashMap<Object, Boolean> visited = new IdentityHashMap<>();
-        LinkedHashSet<String> matched = new LinkedHashSet<>();
-        queue.add(new Node(root, 0));
-
-        int examined = 0;
-        while (!queue.isEmpty() && examined < ACTION_MAX_OBJECTS) {
-            Node node = queue.removeFirst();
-            Object value = node.value;
-            if (value == null || node.depth > ACTION_MAX_DEPTH) {
-                continue;
-            }
-
-            Class<?> type = value.getClass();
-            if (isScalar(type)) {
-                String action = promotedActionName(value);
-                if (action != null) {
-                    matched.add(action);
-                }
-                continue;
-            }
-            if (visited.put(value, Boolean.TRUE) != null) {
-                continue;
-            }
-            examined++;
-
-            if (type.isArray()) {
-                int length = Math.min(
-                        Array.getLength(value),
-                        ACTION_MAX_COLLECTION_ITEMS
-                );
-                for (int index = 0; index < length; index++) {
-                    queue.addLast(new Node(
-                            Array.get(value, index),
-                            node.depth + 1
-                    ));
-                }
-                continue;
-            }
-            if (value instanceof Collection<?>) {
-                int count = 0;
-                for (Object item : (Collection<?>) value) {
-                    if (count++ >= ACTION_MAX_COLLECTION_ITEMS) {
-                        break;
-                    }
-                    queue.addLast(new Node(item, node.depth + 1));
-                }
-                continue;
-            }
-            if (value instanceof Map<?, ?>) {
-                int count = 0;
-                for (Object item : ((Map<?, ?>) value).values()) {
-                    if (count++ >= ACTION_MAX_COLLECTION_ITEMS) {
-                        break;
-                    }
-                    queue.addLast(new Node(item, node.depth + 1));
-                }
-                continue;
-            }
-            if (!shouldTraverse(type)) {
-                continue;
-            }
-
-            for (Field field : allFields(type)) {
-                if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
-                    continue;
-                }
-                Object child = read(field, value);
-                if (child != null) {
-                    queue.addLast(new Node(child, node.depth + 1));
-                }
-            }
-        }
-
-        return new ActionMatch(true, !matched.isEmpty(), matched);
-    }
-
-    private static String promotedActionName(Object value) {
-        Class<?> type = value.getClass();
-        String raw;
-        if (value instanceof Enum<?>) {
-            raw = ((Enum<?>) value).name();
-        } else {
-            raw = String.valueOf(value);
-            int hash = raw.lastIndexOf('#');
-            if (hash >= 0 && hash + 1 < raw.length()) {
-                raw = raw.substring(hash + 1);
-            }
-        }
-
-        if (PROMOTED_ACTIONS.contains(raw)) {
-            return raw;
-        }
-        if (ACTION_ENUM_CLASS.equals(type.getName())) {
-            for (String action : PROMOTED_ACTIONS) {
-                if (raw.endsWith(action)) {
-                    return action;
-                }
-            }
-        }
-        return null;
     }
 
     private static boolean startsWithPromoted(String value) {
@@ -272,46 +144,6 @@ final class BundledAdPatterns {
     private static boolean isPromotedMetadata(Object value) {
         return value != null
                 && PROMOTED_METADATA_CLASS.equals(value.getClass().getName());
-    }
-
-    private static Object read(Field field, Object owner) {
-        if (field == null || owner == null) {
-            return null;
-        }
-        try {
-            field.setAccessible(true);
-            return field.get(owner);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static boolean shouldTraverse(Class<?> type) {
-        String name = type.getName();
-        return name.startsWith("com.x.urt.items.post.")
-                || name.startsWith("com.x.models.")
-                || name.startsWith("kotlin.collections.")
-                || name.startsWith("java.util.");
-    }
-
-    private static boolean isScalar(Class<?> type) {
-        return type.isPrimitive()
-                || type.isEnum()
-                || Number.class.isAssignableFrom(type)
-                || CharSequence.class.isAssignableFrom(type)
-                || Boolean.class == type
-                || Character.class == type
-                || Class.class == type;
-    }
-
-    private static Field[] allFields(Class<?> type) {
-        ArrayList<Field> fields = new ArrayList<>();
-        Class<?> current = type;
-        while (current != null && current != Object.class) {
-            Collections.addAll(fields, current.getDeclaredFields());
-            current = current.getSuperclass();
-        }
-        return fields.toArray(new Field[0]);
     }
 
     static final class Classification {
@@ -367,14 +199,14 @@ final class BundledAdPatterns {
             ArrayList<Field> strings = new ArrayList<>();
             ArrayList<Field> objects = new ArrayList<>();
 
-            for (Field field : allFields(type)) {
+            for (Field field : Reflect.allFields(type)) {
                 if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
                     continue;
                 }
                 try {
                     field.setAccessible(true);
                 } catch (Throwable ignored) {
-                    // Field#get may still work under LSPosed in the target process.
+                    // Field#get may still work inside the target process.
                 }
 
                 Class<?> declared = field.getType();
@@ -415,36 +247,6 @@ final class BundledAdPatterns {
                 return 1;
             }
             return 2;
-        }
-    }
-
-    private static final class ActionMatch {
-        static final ActionMatch NOT_USED = new ActionMatch(
-                false,
-                false,
-                Collections.<String>emptySet()
-        );
-
-        final boolean used;
-        final boolean promoted;
-        final Set<String> actions;
-
-        ActionMatch(boolean used, boolean promoted, Set<String> actions) {
-            this.used = used;
-            this.promoted = promoted;
-            this.actions = Collections.unmodifiableSet(
-                    new LinkedHashSet<>(actions)
-            );
-        }
-    }
-
-    private static final class Node {
-        final Object value;
-        final int depth;
-
-        Node(Object value, int depth) {
-            this.value = value;
-            this.depth = depth;
         }
     }
 }

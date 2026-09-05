@@ -1,6 +1,8 @@
 package my.MrxSiN.twitterhideads;
 
-import de.robv.android.xposed.XposedHelpers;
+import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.os.Build;
 
 /** Exact render-hook mappings retained as a zero-scan fast path. */
 final class CompatibilityProfile {
@@ -35,34 +37,18 @@ final class CompatibilityProfile {
     private CompatibilityProfile() {
     }
 
-    static DetectedVersion detect(Object context) {
+    static DetectedVersion detect(Context context) {
         if (context == null) {
             return DetectedVersion.UNKNOWN;
         }
         try {
-            Object packageManager = XposedHelpers.callMethod(context, "getPackageManager");
-            Object packageInfo = XposedHelpers.callMethod(
-                    packageManager,
-                    "getPackageInfo",
-                    TARGET_PACKAGE,
-                    0
-            );
+            PackageInfo packageInfo = context.getPackageManager()
+                    .getPackageInfo(TARGET_PACKAGE, 0);
 
-            Object rawName = XposedHelpers.getObjectField(packageInfo, "versionName");
-            String versionName = rawName == null ? null : String.valueOf(rawName);
-
-            long versionCode = -1L;
-            try {
-                Object rawCode = XposedHelpers.callMethod(packageInfo, "getLongVersionCode");
-                if (rawCode instanceof Number) {
-                    versionCode = ((Number) rawCode).longValue();
-                }
-            } catch (Throwable ignored) {
-                Object rawCode = XposedHelpers.getObjectField(packageInfo, "versionCode");
-                if (rawCode instanceof Number) {
-                    versionCode = ((Number) rawCode).longValue();
-                }
-            }
+            String versionName = packageInfo.versionName;
+            long versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? packageInfo.getLongVersionCode()
+                    : packageInfo.versionCode;
 
             return new DetectedVersion(versionName, versionCode);
         } catch (Throwable ignored) {

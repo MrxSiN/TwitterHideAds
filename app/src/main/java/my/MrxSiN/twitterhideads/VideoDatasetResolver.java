@@ -14,11 +14,9 @@ import java.util.Enumeration;
 import java.util.List;
 
 import dalvik.system.DexFile;
-import de.robv.android.xposed.XposedBridge;
 
 /** Resolves the single pre-pager Video Tab batch-copy method by structure. */
 final class VideoDatasetResolver {
-    private static final String TAG = "TwitterHideAds";
     private static final String PREFS = "twitterhideads_video_dataset_profile";
     private static final String CACHE_FORMAT = "1";
     private static final String URT_PREFIX = "com.x.urt.";
@@ -289,7 +287,7 @@ final class VideoDatasetResolver {
     }
 
     private static void log(String message) {
-        XposedBridge.log("[" + TAG + "] " + message);
+        ModuleRuntime.log(message);
     }
 
     static final class Resolution {

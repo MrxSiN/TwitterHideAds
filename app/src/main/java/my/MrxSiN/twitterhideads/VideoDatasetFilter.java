@@ -4,7 +4,6 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -13,12 +12,10 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
+import io.github.libxposed.api.XposedInterface;
 
 /** Single-hook upstream Video Tab dataset filter. */
 final class VideoDatasetFilter {
-    private static final String TAG = "TwitterHideAds";
     private static final AtomicBoolean INSTALLED = new AtomicBoolean(false);
     private static final AtomicInteger FILTERED_BATCHES = new AtomicInteger();
     private static final AtomicInteger FILTER_ERRORS = new AtomicInteger();
@@ -38,12 +35,15 @@ final class VideoDatasetFilter {
 
         final Method boundary = resolution.method;
         try {
-            XposedBridge.hookMethod(boundary, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    filter(boundary, param);
-                }
+            XposedInterface.HookHandle handle = ModuleRuntime.hook(boundary, chain -> {
+                Object[] replacement = filteredArguments(boundary, chain);
+                return replacement == null ? chain.proceed() : chain.proceed(replacement);
             });
+            if (handle == null) {
+                log("Video dataset filter hook failed; fail-open mode active: "
+                        + "framework interface unavailable");
+                return;
+            }
             log("Video dataset filter initialized: boundary=" + boundary
                     + ", score=" + resolution.score
                     + ", source=" + resolution.source
@@ -52,25 +52,33 @@ final class VideoDatasetFilter {
                     + ", composeHooks=0, autoplayHooks=0, playbackHooks=0, playerHooks=0");
         } catch (Throwable throwable) {
             log("Video dataset filter hook failed; fail-open mode active: "
-                    + describeThrowable(throwable));
+                    + Reflect.describeThrowable(throwable));
         }
     }
 
-    private static void filter(Method boundary, XC_MethodHook.MethodHookParam param) {
+    /**
+     * Returns the argument array to proceed with when the promoted entries of
+     * this batch can be removed safely, or {@code null} to proceed unchanged.
+     */
+    private static Object[] filteredArguments(
+            Method boundary,
+            XposedInterface.Chain chain
+    ) {
         try {
-            if (param.args == null || param.args.length < 2 || !calledFromVideoTab()) {
-                return;
+            List<Object> args = chain.getArgs();
+            if (args.size() < 2 || !calledFromVideoTab()) {
+                return null;
             }
-            Object original = param.args[1];
+            Object original = args.get(1);
             VideoDatasetClassifier.Batch batch = VideoDatasetClassifier.inspect(original);
             if (!batch.safeMixedVideoBatch()) {
-                return;
+                return null;
             }
 
             List<Object> filteredElements = VideoDatasetClassifier.filteredElements(original);
             int removed = batch.containerSize - filteredElements.size();
             if (removed <= 0 || filteredElements.size() < batch.normalCount) {
-                return;
+                return null;
             }
 
             Class<?> declaredType = boundary.getParameterTypes()[1];
@@ -82,7 +90,7 @@ final class VideoDatasetFilter {
                             + ", runtimeType=" + original.getClass().getName()
                             + ", promoted=" + batch.promotedCount);
                 }
-                return;
+                return null;
             }
 
             VideoDatasetClassifier.Batch verified = VideoDatasetClassifier.inspect(replacement);
@@ -90,10 +98,12 @@ final class VideoDatasetFilter {
                     || verified.normalCount < batch.normalCount
                     || verified.containerSize != filteredElements.size()) {
                 log("Video dataset replacement rejected by verification; fail-open mode active");
-                return;
+                return null;
             }
 
-            param.args[1] = replacement;
+            Object[] replacementArgs = args.toArray();
+            replacementArgs[1] = replacement;
+
             int number = FILTERED_BATCHES.incrementAndGet();
             log("Filtered promoted videos before pager creation: batch=" + number
                     + ", boundary=" + boundary.getDeclaringClass().getName()
@@ -102,11 +112,14 @@ final class VideoDatasetFilter {
                     + ", filteredSize=" + verified.containerSize
                     + ", removed=" + removed
                     + ", promotedIds=" + batch.promotedIds);
+            return replacementArgs;
         } catch (Throwable throwable) {
             int error = FILTER_ERRORS.incrementAndGet();
             if (error <= 8) {
-                log("Video dataset filtering failed open: " + describeThrowable(throwable));
+                log("Video dataset filtering failed open: "
+                        + Reflect.describeThrowable(throwable));
             }
+            return null;
         }
     }
 
@@ -263,12 +276,7 @@ final class VideoDatasetFilter {
         }
     }
 
-    private static String describeThrowable(Throwable throwable) {
-        String message = throwable.getMessage();
-        return throwable.getClass().getSimpleName() + (message == null ? "" : ": " + message);
-    }
-
     private static void log(String message) {
-        XposedBridge.log("[" + TAG + "] " + message);
+        ModuleRuntime.log(message);
     }
 }
