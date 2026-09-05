@@ -1,6 +1,6 @@
 {
   "schemaVersion": 7,
-  "moduleVersion": "1.3.0",
+  "moduleVersion": "2.0.0",
   "releaseChannel": "stable",
   "targetPackage": "com.twitter.android",
   "exactProfiles": [

@@ -4,28 +4,51 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 APP_GRADLE="$ROOT/app/build.gradle.kts"
 WORKFLOW="$ROOT/.github/workflows/android.yml"
-INIT="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/XposedInit.java"
+MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
+INIT="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/ModuleMain.java"
+RUNTIME="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/ModuleRuntime.java"
 BLOCKER="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/TwitterAdBlocker.java"
 RESOLVER="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/AdaptiveHookResolver.java"
+CANDIDATES="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/BoundaryCandidateSource.java"
+CACHE="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/AdaptiveBoundaryCache.java"
 VIDEO_RESOLVER="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/VideoDatasetResolver.java"
 VIDEO_FILTER="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/VideoDatasetFilter.java"
 VIDEO_CLASSIFIER="$ROOT/app/src/main/java/my/MrxSiN/twitterhideads/VideoDatasetClassifier.java"
 PATTERN_JSON="$ROOT/app/src/main/assets/ad_patterns.json"
+XPOSED_META="$ROOT/app/src/main/resources/META-INF/xposed"
 
-for file in "$APP_GRADLE" "$WORKFLOW" "$INIT" "$BLOCKER" "$RESOLVER" \
-  "$VIDEO_RESOLVER" "$VIDEO_FILTER" "$VIDEO_CLASSIFIER" "$PATTERN_JSON"; do
+for file in "$APP_GRADLE" "$WORKFLOW" "$MANIFEST" "$INIT" "$RUNTIME" "$BLOCKER" \
+  "$RESOLVER" "$CANDIDATES" "$CACHE" "$VIDEO_RESOLVER" "$VIDEO_FILTER" \
+  "$VIDEO_CLASSIFIER" "$PATTERN_JSON" "$XPOSED_META/java_init.list" \
+  "$XPOSED_META/module.prop" "$XPOSED_META/scope.list"; do
   test -f "$file"
 done
 
-grep -q 'val appVersion = "1.3.0"' "$APP_GRADLE"
-grep -q 'versionCode = 30' "$APP_GRADLE"
+grep -q 'val appVersion = "2.0.0"' "$APP_GRADLE"
+grep -q 'versionCode = 31' "$APP_GRADLE"
+grep -q 'compileOnly("io.github.libxposed:api:102.0.0")' "$APP_GRADLE"
 grep -q 'implementation("org.luckypray:dexkit:2.2.0")' "$APP_GRADLE"
+grep -q 'merges += "META-INF/xposed/\*"' "$APP_GRADLE"
+grep -q 'minSdk = 26' "$APP_GRADLE"
 grep -q 'r0adkll/sign-android-release@v1' "$WORKFLOW"
 ! grep -q 'signingConfigs' "$APP_GRADLE"
 
-grep -q 'MODULE_VERSION = "1.3.0"' "$INIT"
+# Modern Xposed API module declaration. The legacy assets entry point and the
+# xposed* manifest metadata are replaced by META-INF/xposed resources.
+grep -q '^my.MrxSiN.twitterhideads.ModuleMain$' "$XPOSED_META/java_init.list"
+grep -q '^com.twitter.android$' "$XPOSED_META/scope.list"
+grep -q '^minApiVersion=' "$XPOSED_META/module.prop"
+grep -q '^targetApiVersion=102$' "$XPOSED_META/module.prop"
+! test -f "$ROOT/app/src/main/assets/xposed_init"
+! grep -q 'xposedmodule\|xposedminversion\|xposedscope' "$MANIFEST"
+! grep -rq 'de.robv.android.xposed' "$ROOT/app/src/main/java"
+
+grep -q 'extends XposedModule' "$INIT"
+grep -q 'MODULE_VERSION = "2.0.0"' "$INIT"
+grep -q 'onPackageReady' "$INIT"
 grep -q 'VideoDatasetResolver.resolve' "$INIT"
 grep -q 'VideoDatasetFilter.install' "$INIT"
+grep -q 'api.deoptimize' "$RUNTIME"
 grep -q 'installedHooks=1' "$VIDEO_FILTER"
 grep -q 'calledFromVideoTab' "$VIDEO_FILTER"
 grep -q 'safeMixedVideoBatch' "$VIDEO_FILTER"
@@ -42,7 +65,7 @@ grep -q 'promotedCount != 0' "$VIDEO_FILTER"
 ! grep -q 'com.x.media.autoplay' "$VIDEO_FILTER"
 ! grep -q 'com.x.media.playback' "$VIDEO_FILTER"
 
-grep -q '"moduleVersion": "1.3.0"' "$PATTERN_JSON"
+grep -q '"moduleVersion": "2.0.0"' "$PATTERN_JSON"
 grep -q '"installedHooks": 1' "$PATTERN_JSON"
 grep -q '"composeHooks": 0' "$PATTERN_JSON"
 grep -q '"playbackHooks": 0' "$PATTERN_JSON"
