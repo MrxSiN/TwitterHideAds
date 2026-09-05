@@ -30,6 +30,10 @@ public final class TwitterAdBlocker {
     private static final Set<String> UNIQUE_BLOCK_KEYS =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
+    private static final int BOUNDARY_OBSERVATION_LOG_LIMIT = 4;
+    private static final ConcurrentHashMap<String, AtomicInteger> BOUNDARY_OBSERVATIONS =
+            new ConcurrentHashMap<>();
+
     private TwitterAdBlocker() {
     }
 
@@ -107,32 +111,41 @@ public final class TwitterAdBlocker {
         if (!INSTALLED.compareAndSet(false, true)) {
             return;
         }
-        if (resolution == null || resolution.method == null) {
+        if (resolution == null || resolution.method() == null) {
             log("Initialization complete: resolver=adaptive"
                     + ", enforcement=FAIL_OPEN_NO_BOUNDARY"
                     + ", reason=" + (resolution == null ? "null-resolution" : resolution.reason));
             return;
         }
 
-        final String boundary = "adaptive-"
-                + simpleName(resolution.method.getDeclaringClass().getName())
-                + "." + resolution.method.getName();
-        boolean installed = installResolvedBoundary(
-                resolution.method,
-                boundary,
-                null,
-                false
-        );
+        int installed = 0;
+        int deoptimized = 0;
+        for (Method method : resolution.methods) {
+            String boundary = "adaptive-"
+                    + simpleName(method.getDeclaringClass().getName())
+                    + "." + method.getName();
+            if (!installResolvedBoundary(method, boundary, null, true)) {
+                continue;
+            }
+            installed++;
+            // ART inlines these composables into their callers, which would
+            // otherwise keep running the compiled copy past the hook.
+            if (Deoptimizer.deoptimize(method)) {
+                deoptimized++;
+            }
+            log("Installed pre-render boundary [" + boundary + "]: " + method);
+        }
         log("Initialization complete: resolver=adaptive"
                 + ", X=" + detectedVersion.displayName()
-                + ", boundary=" + resolution.method
-                + ", score=" + resolution.score
+                + ", boundaries=" + resolution.methods.size()
+                + ", installedHooks=" + installed
+                + ", topScore=" + resolution.score
                 + ", source=" + resolution.source
                 + ", cacheHit=" + resolution.cacheHit
                 + ", candidateCount=" + resolution.candidateCount
-                + ", enforcement=" + (installed ? "ACTIVE_ADAPTIVE" : "FAIL_OPEN_HOOK_ERROR")
-                + ", directSignalsOnly=true"
-                + ", globalViewHooks=0, deoptimized=0");
+                + ", enforcement=" + (installed > 0 ? "ACTIVE_ADAPTIVE" : "FAIL_OPEN_HOOK_ERROR")
+                + ", deoptimizeSupported=" + Deoptimizer.isSupported()
+                + ", deoptimized=" + deoptimized);
     }
 
     private static int installExactBoundaryHooks(
@@ -190,6 +203,7 @@ public final class TwitterAdBlocker {
                                 expectedRenderModel,
                                 allowActionFallback
                         );
+                logBoundaryObservation(boundary, postModel, classification);
                 if (!classification.promoted) {
                     return;
                 }
@@ -235,6 +249,34 @@ public final class TwitterAdBlocker {
             }
         }
         return false;
+    }
+
+    private static int observationCount(String key) {
+        AtomicInteger seen = BOUNDARY_OBSERVATIONS.get(key);
+        if (seen == null) {
+            seen = new AtomicInteger();
+            AtomicInteger existing = BOUNDARY_OBSERVATIONS.putIfAbsent(key, seen);
+            if (existing != null) {
+                seen = existing;
+            }
+        }
+        return seen.incrementAndGet();
+    }
+
+    private static void logBoundaryObservation(
+            String boundary,
+            Object postModel,
+            BundledAdPatterns.Classification classification
+    ) {
+        if (observationCount(boundary) > BOUNDARY_OBSERVATION_LOG_LIMIT) {
+            return;
+        }
+        log("Boundary observation: boundary=" + boundary
+                + ", model=" + postModel.getClass().getName()
+                + ", promoted=" + classification.promoted
+                + ", entryId=" + safeEntryId(classification.entryId)
+                + ", signals=" + classification.signals
+                + ", actionFallbackUsed=" + classification.actionFallbackUsed);
     }
 
     private static void recordBlock(

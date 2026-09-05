@@ -25,26 +25,30 @@ import dalvik.system.DexFile;
 import de.robv.android.xposed.XposedBridge;
 
 /**
- * Resolves a renamed X post-render boundary by structure instead of class names.
+ * Resolves the renamed X post render boundaries by structure instead of by
+ * class name.
  *
- * The accepted shape is intentionally narrow and mirrors the primary boundary
- * observed in X 12.7.1, 12.8.0 and 12.9.1:
+ * Structural recognition lives in {@link RenderBoundaryShape}; this class owns
+ * discovery (DexKit, with a bounded reflection fallback), ranking and caching.
  *
- *   static void method(PostInterface, Modifier, PostDependency, LayoutScope,
- *                      Composer, int, int)
+ * Every boundary at or above {@link #ACTIVE_THRESHOLD} is returned rather than
+ * a single winner. X compiles one composable into both a defaulted and a
+ * non-defaulted entry point, and renders posts through more than one boundary,
+ * so demanding a unique winner made near-ties resolve to no hook at all.
+ * Suppression is driven by the post model at each boundary, so hooking several
+ * is redundant rather than harmful.
  */
 final class AdaptiveHookResolver {
     private static final String TAG = "TwitterHideAds";
-    private static final String POST_PACKAGE = "com.x.urt.items.post.";
-    private static final String COMPOSER = "androidx.compose.runtime.Composer";
-    private static final String MODIFIER_PREFIX = "androidx.compose.ui.Modifier";
-    private static final String LAYOUT_PREFIX = "androidx.compose.foundation.layout.";
 
     private static final String PREFS = "twitterhideads_adaptive_profile";
-    private static final String CACHE_FORMAT = "2";
+    private static final String CACHE_FORMAT = "4";
     private static final int ACTIVE_THRESHOLD = 320;
-    private static final int MIN_WIN_MARGIN = 25;
     private static final int MAX_REFLECTION_CLASSES = 1500;
+    private static final int MAX_BOUNDARIES = 16;
+
+    private static final String POST_MODEL_DESCRIPTOR =
+            "L" + RenderBoundaryShape.POST_PACKAGE_ROOT.replace('.', '/') + "/";
 
     private AdaptiveHookResolver() {
     }
@@ -71,8 +75,9 @@ final class AdaptiveHookResolver {
                 apkFingerprint
         );
         if (cached != null) {
-            log("Adaptive cache hit: method=" + cached.method
-                    + ", score=" + cached.score);
+            log("Adaptive cache hit: boundaries=" + cached.methods.size()
+                    + ", score=" + cached.score
+                    + ", primary=" + cached.method());
             return cached;
         }
 
@@ -101,10 +106,11 @@ final class AdaptiveHookResolver {
 
         Resolution selected = select(candidates, dexKitStatus, fallbackStatus);
         long elapsed = System.currentTimeMillis() - started;
-        if (selected.method != null) {
+        if (selected.method() != null) {
             saveCached(context, version, apkFingerprint, selected);
-            log("Adaptive resolver selected: method=" + selected.method
-                    + ", score=" + selected.score
+            logCandidateSummary(selected.methods);
+            log("Adaptive resolver selected: boundaries=" + selected.methods.size()
+                    + ", topScore=" + selected.score
                     + ", candidates=" + selected.candidateCount
                     + ", source=" + selected.source
                     + ", elapsedMs=" + elapsed);
@@ -118,6 +124,17 @@ final class AdaptiveHookResolver {
         return selected;
     }
 
+    /**
+     * Asks DexKit for every static void method in the application and lets
+     * {@link RenderBoundaryShape} decide which ones are boundaries. Encoding
+     * the parameter layout in the query itself would re-break on the next
+     * release that adds or drops a parameter, and restricting the search to the
+     * post package hides boundaries declared elsewhere.
+     *
+     * Results are pre-filtered on the raw descriptor so that only methods
+     * taking a post model first are loaded through the host class loader, which
+     * is the expensive step.
+     */
     private static List<Candidate> findWithDexKit(
             String apkPath,
             ClassLoader classLoader
@@ -126,21 +143,15 @@ final class AdaptiveHookResolver {
         try (DexKitBridge bridge = DexKitBridge.create(apkPath)) {
             MethodMatcher matcher = MethodMatcher.create()
                     .modifiers(Modifier.STATIC)
-                    .returnType("void")
-                    .paramTypes(
-                            (String) null,
-                            null,
-                            null,
-                            null,
-                            COMPOSER,
-                            "int",
-                            "int"
-                    );
-            FindMethod query = FindMethod.create()
-                    .searchPackages("com.x.urt.items.post")
-                    .matcher(matcher);
+                    .returnType("void");
+            FindMethod query = FindMethod.create().matcher(matcher);
             MethodDataList result = bridge.findMethod(query);
+            int inspected = 0;
             for (MethodData data : result) {
+                if (!takesPostModelFirst(data)) {
+                    continue;
+                }
+                inspected++;
                 try {
                     Method method = data.getMethodInstance(classLoader);
                     Candidate candidate = evaluate(method, "dexkit");
@@ -153,9 +164,22 @@ final class AdaptiveHookResolver {
             }
             log("DexKit structural query: dexFiles=" + bridge.getDexNum()
                     + ", rawMatches=" + result.size()
+                    + ", postModelFirst=" + inspected
                     + ", eligible=" + candidates.size());
         }
         return candidates;
+    }
+
+    /** Cheap descriptor test that avoids loading every static void method. */
+    private static boolean takesPostModelFirst(MethodData data) {
+        try {
+            String descriptor = data.getDescriptor();
+            int open = descriptor.indexOf('(');
+            return open >= 0
+                    && descriptor.startsWith(POST_MODEL_DESCRIPTOR, open + 1);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static List<Candidate> findWithDexFile(
@@ -169,7 +193,7 @@ final class AdaptiveHookResolver {
             Enumeration<String> entries = dexFile.entries();
             while (entries.hasMoreElements() && scanned < MAX_REFLECTION_CLASSES) {
                 String className = entries.nextElement();
-                if (!className.startsWith(POST_PACKAGE)) {
+                if (!className.startsWith(RenderBoundaryShape.POST_PACKAGE)) {
                     continue;
                 }
                 scanned++;
@@ -195,42 +219,8 @@ final class AdaptiveHookResolver {
     }
 
     private static Candidate evaluate(Method method, String source) {
-        int modifiers = method.getModifiers();
-        Class<?>[] parameters = method.getParameterTypes();
-        if (!Modifier.isStatic(modifiers)
-                || Modifier.isAbstract(modifiers)
-                || Modifier.isNative(modifiers)
-                || method.isSynthetic()
-                || method.getReturnType() != Void.TYPE
-                || parameters.length != 7
-                || !COMPOSER.equals(parameters[4].getName())
-                || parameters[5] != Integer.TYPE
-                || parameters[6] != Integer.TYPE) {
-            return null;
-        }
-
-        String declaring = method.getDeclaringClass().getName();
-        String first = parameters[0].getName();
-        if (!declaring.startsWith(POST_PACKAGE)
-                || !first.startsWith(POST_PACKAGE)) {
-            return null;
-        }
-
-        int score = 0;
-        score += Modifier.isStatic(modifiers) ? 25 : 0;
-        score += method.getReturnType() == Void.TYPE ? 25 : 0;
-        score += directPostPackage(declaring) ? 80 : 25;
-        score += first.startsWith(POST_PACKAGE) ? 80 : 0;
-        score += parameters[0].isInterface() ? 15 : 0;
-        score += COMPOSER.equals(parameters[4].getName()) ? 60 : 0;
-        score += parameters[1].getName().startsWith(MODIFIER_PREFIX) ? 35 : 0;
-        score += parameters[2].getName().startsWith(POST_PACKAGE) ? 20 : 0;
-        score += parameters[3].getName().startsWith(LAYOUT_PREFIX) ? 35 : 0;
-        score += parameters[5] == Integer.TYPE && parameters[6] == Integer.TYPE
-                ? 25 : 0;
-        score += method.getName().length() <= 2 ? 10 : 0;
-
-        if (score < ACTIVE_THRESHOLD - 40) {
+        int score = RenderBoundaryShape.score(method);
+        if (score == RenderBoundaryShape.NOT_A_BOUNDARY || score < ACTIVE_THRESHOLD) {
             return null;
         }
         return new Candidate(method, score, source);
@@ -252,8 +242,7 @@ final class AdaptiveHookResolver {
         Set<String> seen = new LinkedHashSet<>();
         ArrayList<Candidate> candidates = new ArrayList<>();
         for (Candidate candidate : rawCandidates) {
-            String key = signature(candidate.method);
-            if (seen.add(key)) {
+            if (seen.add(signature(candidate.method))) {
                 candidates.add(candidate);
             }
         }
@@ -267,38 +256,26 @@ final class AdaptiveHookResolver {
             }
         });
 
-        Candidate best = candidates.get(0);
-        int secondScore = candidates.size() > 1 ? candidates.get(1).score : -1;
-        if (best.score < ACTIVE_THRESHOLD) {
-            return Resolution.failure(
-                    "best-score-below-threshold:" + best.score,
-                    candidates.size()
-            );
-        }
-        if (secondScore >= 0 && best.score - secondScore < MIN_WIN_MARGIN) {
-            logCandidateSummary(candidates);
-            return Resolution.failure(
-                    "ambiguous-top-candidates:" + best.score + "/" + secondScore,
-                    candidates.size()
-            );
+        int limit = Math.min(MAX_BOUNDARIES, candidates.size());
+        ArrayList<Method> methods = new ArrayList<>(limit);
+        for (int index = 0; index < limit; index++) {
+            methods.add(candidates.get(index).method);
         }
         return Resolution.success(
-                best.method,
-                best.score,
+                methods,
+                candidates.get(0).score,
                 candidates.size(),
-                best.source,
+                candidates.get(0).source,
                 false
         );
     }
 
-    private static void logCandidateSummary(List<Candidate> candidates) {
-        int limit = Math.min(5, candidates.size());
-        for (int index = 0; index < limit; index++) {
-            Candidate candidate = candidates.get(index);
-            log("Adaptive candidate #" + (index + 1)
-                    + ": score=" + candidate.score
-                    + ", source=" + candidate.source
-                    + ", method=" + candidate.method);
+    private static void logCandidateSummary(List<Method> methods) {
+        for (int index = 0; index < methods.size(); index++) {
+            Method method = methods.get(index);
+            log("Adaptive boundary #" + (index + 1)
+                    + ": score=" + RenderBoundaryShape.score(method)
+                    + ", method=" + method);
         }
     }
 
@@ -315,33 +292,55 @@ final class AdaptiveHookResolver {
                     || !apkFingerprint.equals(prefs.getString(prefix + "apk", null))) {
                 return null;
             }
-            String className = prefs.getString(prefix + "class", null);
-            String methodName = prefs.getString(prefix + "method", null);
-            String params = prefs.getString(prefix + "params", null);
-            int score = prefs.getInt(prefix + "score", -1);
-            if (className == null || methodName == null || params == null) {
+            Set<String> signatures = prefs.getStringSet(prefix + "boundaries", null);
+            if (signatures == null || signatures.isEmpty()) {
                 return null;
             }
-            Class<?> type = Class.forName(className, false, classLoader);
-            for (Method method : type.getDeclaredMethods()) {
-                if (!methodName.equals(method.getName())
-                        || !params.equals(parameterKey(method))) {
-                    continue;
-                }
-                Candidate verified = evaluate(method, "cache");
-                if (verified == null || verified.score < ACTIVE_THRESHOLD) {
+
+            ArrayList<Method> methods = new ArrayList<>(signatures.size());
+            int topScore = 0;
+            for (String cached : sorted(signatures)) {
+                Method method = resolveSignature(cached, classLoader);
+                if (method == null) {
                     return null;
                 }
-                return Resolution.success(
-                        method,
-                        Math.max(score, verified.score),
-                        1,
-                        "cache",
-                        true
-                );
+                int score = RenderBoundaryShape.score(method);
+                if (score == RenderBoundaryShape.NOT_A_BOUNDARY || score < ACTIVE_THRESHOLD) {
+                    return null;
+                }
+                topScore = Math.max(topScore, score);
+                methods.add(method);
             }
+            return Resolution.success(
+                    methods,
+                    topScore,
+                    methods.size(),
+                    "cache",
+                    true
+            );
         } catch (Throwable throwable) {
             log("Adaptive cache ignored: " + describeThrowable(throwable));
+        }
+        return null;
+    }
+
+    private static Method resolveSignature(String cached, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        int hash = cached.indexOf('#');
+        int open = cached.indexOf('(', hash + 1);
+        if (hash < 0 || open < 0 || !cached.endsWith(")")) {
+            return null;
+        }
+        String className = cached.substring(0, hash);
+        String methodName = cached.substring(hash + 1, open);
+        String params = cached.substring(open + 1, cached.length() - 1);
+
+        Class<?> type = Class.forName(className, false, classLoader);
+        for (Method method : type.getDeclaredMethods()) {
+            if (methodName.equals(method.getName())
+                    && params.equals(parameterKey(method))) {
+                return method;
+            }
         }
         return null;
     }
@@ -352,23 +351,30 @@ final class AdaptiveHookResolver {
             String apkFingerprint,
             Resolution resolution
     ) {
-        if (resolution.method == null) {
+        if (resolution.methods.isEmpty()) {
             return;
         }
         try {
+            LinkedHashSet<String> signatures = new LinkedHashSet<>();
+            for (Method method : resolution.methods) {
+                signatures.add(signature(method));
+            }
             String prefix = cachePrefix(version);
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .edit()
                     .putString(prefix + "format", CACHE_FORMAT)
                     .putString(prefix + "apk", apkFingerprint)
-                    .putString(prefix + "class", resolution.method.getDeclaringClass().getName())
-                    .putString(prefix + "method", resolution.method.getName())
-                    .putString(prefix + "params", parameterKey(resolution.method))
-                    .putInt(prefix + "score", resolution.score)
+                    .putStringSet(prefix + "boundaries", signatures)
                     .apply();
         } catch (Throwable throwable) {
             log("Adaptive cache save failed: " + describeThrowable(throwable));
         }
+    }
+
+    private static List<String> sorted(Set<String> values) {
+        ArrayList<String> ordered = new ArrayList<>(values);
+        Collections.sort(ordered);
+        return ordered;
     }
 
     private static String sourceDir(Context context) {
@@ -392,12 +398,6 @@ final class AdaptiveHookResolver {
 
     private static String cachePrefix(CompatibilityProfile.DetectedVersion version) {
         return "v" + version.displayCode() + ".";
-    }
-
-    private static boolean directPostPackage(String className) {
-        int lastDot = className.lastIndexOf('.');
-        return lastDot >= 0
-                && "com.x.urt.items.post".equals(className.substring(0, lastDot));
     }
 
     private static String parameterKey(Method method) {
@@ -428,7 +428,7 @@ final class AdaptiveHookResolver {
     }
 
     static final class Resolution {
-        final Method method;
+        final List<Method> methods;
         final int score;
         final int candidateCount;
         final String source;
@@ -436,14 +436,14 @@ final class AdaptiveHookResolver {
         final String reason;
 
         private Resolution(
-                Method method,
+                List<Method> methods,
                 int score,
                 int candidateCount,
                 String source,
                 boolean cacheHit,
                 String reason
         ) {
-            this.method = method;
+            this.methods = methods;
             this.score = score;
             this.candidateCount = candidateCount;
             this.source = source;
@@ -451,15 +451,20 @@ final class AdaptiveHookResolver {
             this.reason = reason;
         }
 
+        /** The highest scoring boundary, or {@code null} when unresolved. */
+        Method method() {
+            return methods.isEmpty() ? null : methods.get(0);
+        }
+
         static Resolution success(
-                Method method,
+                List<Method> methods,
                 int score,
                 int candidateCount,
                 String source,
                 boolean cacheHit
         ) {
             return new Resolution(
-                    method,
+                    methods,
                     score,
                     candidateCount,
                     source,
@@ -474,7 +479,7 @@ final class AdaptiveHookResolver {
 
         static Resolution failure(String reason, int candidateCount) {
             return new Resolution(
-                    null,
+                    Collections.<Method>emptyList(),
                     -1,
                     candidateCount,
                     "none",
