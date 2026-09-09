@@ -57,8 +57,8 @@ final class CompatibilityProfile {
     }
 
     /**
-     * X 12.9.1 is intentionally excluded in this adaptive test build. The
-     * resolver must rediscover its renamed boundary without using s6.e.
+     * X 12.9.1 is intentionally excluded. The adaptive resolver rediscovers its
+     * renamed boundary without using s6.e.
      */
     static Profile selectExact(DetectedVersion version) {
         if (version == null || version.versionName == null) {

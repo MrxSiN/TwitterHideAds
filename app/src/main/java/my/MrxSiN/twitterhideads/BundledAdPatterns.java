@@ -14,17 +14,29 @@ import java.util.concurrent.ConcurrentHashMap;
  * Advertisement-classification rules shipped inside the APK.
  *
  * Validated X 12.7.1 and X 12.8.0 render models expose two ad-specific properties:
- *  - an entry ID beginning with "promoted-";
+ *  - an entry ID carrying the URT "promoted-" token;
  *  - a direct com.x.models.TimelinePromotedMetadata field.
+ *
+ * Only the Home timeline names a promoted entry "promoted-tweet-...". Every
+ * surface that nests a post inside a module prefixes that module's own entry,
+ * so the same advertisement arrives as
+ * "conversationthread-<id>-promoted-tweet-<id>-<hash>" in a post detail and as
+ * "search-conversation-<id>-promoted-tweet-<id>-<hash>" in search. The token is
+ * therefore matched at any segment boundary rather than only at the start.
  *
  * The promoted PostActionType values discovered by the menu probes are retained
  * in {@link PromotedActionScanner} as a compatibility fallback for an unfamiliar
  * model shape. No user-specific advertiser or post IDs are required.
  */
 final class BundledAdPatterns {
-    static final String SCHEMA_VERSION = "6";
+    static final String SCHEMA_VERSION = "7";
     static final String PROMOTED_METADATA_CLASS =
             "com.x.models.TimelinePromotedMetadata";
+
+    /** URT names every promoted entry with this token, wherever it is nested. */
+    private static final String PROMOTED_ENTRY_TOKEN = "promoted-";
+
+    private static final String PROMOTED_METADATA_SUFFIX = "PromotedMetadata";
 
     private static final ConcurrentHashMap<Class<?>, DirectAccess> DIRECT_ACCESS =
             new ConcurrentHashMap<>();
@@ -59,7 +71,7 @@ final class BundledAdPatterns {
             if (entryId == null && isLikelyEntryField(field, text)) {
                 entryId = text;
             }
-            if (startsWithPromoted(text)) {
+            if (isPromotedEntryId(text)) {
                 promotedEntry = true;
                 entryId = text;
                 break;
@@ -124,9 +136,17 @@ final class BundledAdPatterns {
         );
     }
 
-    private static boolean startsWithPromoted(String value) {
-        return value != null
-                && value.toLowerCase(Locale.ROOT).startsWith("promoted-");
+    /**
+     * True when {@code value} carries the URT promoted token, either as the
+     * whole entry ID or as one of its "-" separated segments.
+     */
+    private static boolean isPromotedEntryId(String value) {
+        if (value == null) {
+            return false;
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        return lower.startsWith(PROMOTED_ENTRY_TOKEN)
+                || lower.contains("-" + PROMOTED_ENTRY_TOKEN);
     }
 
     private static boolean isLikelyEntryField(Field field, String value) {
@@ -138,12 +158,22 @@ final class BundledAdPatterns {
         return "a".equals(field.getName())
                 || lowerName.contains("entry")
                 || lowerValue.startsWith("tweet-")
-                || lowerValue.startsWith("promoted-");
+                || lowerValue.contains("-tweet-")
+                || isPromotedEntryId(lowerValue);
     }
 
+    /**
+     * X obfuscates the promoted-metadata class away on recent releases, so the
+     * validated name is only the fast path and any model class still named
+     * after it counts as the same signal.
+     */
     private static boolean isPromotedMetadata(Object value) {
-        return value != null
-                && PROMOTED_METADATA_CLASS.equals(value.getClass().getName());
+        if (value == null) {
+            return false;
+        }
+        String name = value.getClass().getName();
+        return PROMOTED_METADATA_CLASS.equals(name)
+                || name.endsWith(PROMOTED_METADATA_SUFFIX);
     }
 
     static final class Classification {
@@ -240,7 +270,7 @@ final class BundledAdPatterns {
         private static int objectFieldPriority(Field field) {
             String typeName = field.getType().getName();
             if (PROMOTED_METADATA_CLASS.equals(typeName)
-                    || typeName.contains("PromotedMetadata")) {
+                    || typeName.endsWith(PROMOTED_METADATA_SUFFIX)) {
                 return 0;
             }
             if ("m".equals(field.getName())) {

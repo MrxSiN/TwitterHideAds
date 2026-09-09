@@ -2,6 +2,16 @@
 
 All notable changes to Twitter Hide Ads are documented here.
 
+## 2.1.0 - 2026-09-09
+
+- Suppress promoted posts on every X surface instead of only the Home timeline. Post detail, search and any other surface that renders posts through the same Compose boundaries are now covered.
+- Match the URT `promoted-` entry token at any `-` segment boundary rather than only at the start of the entry identifier. Only the Home timeline names a promoted entry `promoted-tweet-<id>-<hash>`; a surface that nests the post inside a module prefixes that module's own entry, so the same advertisement arrives as `conversationthread-<id>-promoted-tweet-<id>-<hash>` in a post detail and as `search-conversation-<id>-promoted-tweet-<id>-<hash>` in search. These compound identifiers failed the previous prefix test and rendered.
+- Recognise a promoted-metadata field by any runtime class name ending in `PromotedMetadata` instead of only the validated `com.x.models.TimelinePromotedMetadata`, which X has obfuscated away since `12.22.0`.
+- Accept nested entry identifiers when selecting which direct string field carries the entry ID, so post detail and search entries are reported in the logs instead of `unknown`.
+- Raised the classifier schema version from `6` to `7`.
+- Validated on device against X `12.23.1-prod.01` under Vector 2.2: 11 deoptimized boundaries installed, `enforcement=ACTIVE_ADAPTIVE`, promoted entries blocked before render on both the Home timeline and post detail, with normal posts and replies unaffected.
+- Increased Android `versionCode` from `31` to `32`.
+
 ## 2.0.0 - 2026-09-06
 
 - Migrated the module from the legacy `de.robv.android.xposed` API 82 to the modern libxposed API `102.0.0`, as implemented by [Vector](https://github.com/JingMatrix/Vector). Frameworks that only implement the legacy API can no longer load the module.

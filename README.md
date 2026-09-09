@@ -16,7 +16,7 @@
 
 ## ✨ Features
 
-- Suppresses promoted posts in the X Home timeline before Compose renders them.
+- Suppresses promoted posts wherever X renders them: Home timeline, post detail, search and every other surface sharing the post render boundaries.
 - Filters promoted videos out of the full-screen Video Tab before pager creation.
 - Waits for `Application.attach()` so X's final app class loader is ready before discovery.
 - Uses DexKit to locate obfuscated render boundaries across app updates.
@@ -46,8 +46,10 @@ X ships a fully obfuscated, Compose-rendered timeline, and the names of the clas
 4. Each surviving method is scored by role rather than by parameter position: a `Composer` followed by the compiler-generated `$changed` mask and optional `$default` mask, a post model in first position, and any `Modifier`, layout-scope or post-dependency parameters found in between.
 5. Every boundary scoring at or above the activation threshold is hooked. The Kotlin Compose compiler emits both a defaulted and a non-defaulted entry point for one composable, so requiring a single unique winner used to resolve to no hook at all.
 6. Each resolved boundary is deoptimized through `XposedInterface.deoptimize`. ART inlines these small composables into their callers, and without deoptimization the caller keeps running the compiled copy and the hook is never reached.
-7. At render time the post model is classified from its direct fields: a `promoted-` entry identifier, or a promoted-metadata field. A bounded action-graph walk is used as a fallback where the metadata class itself has been obfuscated away.
+7. At render time the post model is classified from its direct fields: an entry identifier carrying the `promoted-` token, or a promoted-metadata field. A bounded action-graph walk is used as a fallback where the metadata class itself has been obfuscated away.
 8. A promoted post is suppressed before Compose renders it. Normal posts are passed through untouched.
+
+   Only the Home timeline names a promoted entry `promoted-tweet-<id>-<hash>`. Every surface that nests a post inside a module prefixes that module's own entry, so the same advertisement arrives as `conversationthread-<id>-promoted-tweet-<id>-<hash>` in a post detail and as `search-conversation-<id>-promoted-tweet-<id>-<hash>` in search. The token is therefore matched at any `-` segment boundary, which is what makes suppression app-wide rather than Home-only.
 9. The Video Tab is handled separately at the data layer. The resolver identifies the URT state-copy method receiving the tab's mixed Kotlin immutable list and rebuilds a compatible immutable copy with promoted entries removed, preserving cursor and paging-control entries.
 
 The runtime log for this revision identifies the active Home timeline boundary as:
@@ -114,7 +116,7 @@ Native libraries are packaged uncompressed. The framework loads a module's nativ
 
 ## 🧪 Validation status
 
-The release version is `2.0.0` (`versionCode 31`). Resolution and suppression logic is unchanged from `1.3.0`; this release moves the module onto the modern Xposed API and has not yet been re-validated on a device. Adaptive Home timeline suppression was last confirmed active on X `12.22.0-prod.01`, resolving through the `com.x.jetfuel.v2.element.attribute` boundary and blocking promoted entries before render. Video Tab dataset filtering is unchanged from `1.2.0` and remains scoped to callers under `com.x.video.tab`.
+The release version is `2.1.0` (`versionCode 32`). Suppression was validated on device against X `12.23.1-prod.01` under Vector 2.2: the adaptive resolver installed 11 deoptimized boundaries with `enforcement=ACTIVE_ADAPTIVE`, and promoted entries were blocked before render both on the Home timeline and inside post detail, where entry identifiers such as `conversationthread-<id>-promoted-tweet-<id>-<hash>` had previously been let through. Normal posts, replies and search results continued to render. Video Tab dataset filtering is unchanged from `1.2.0` and remains scoped to callers under `com.x.video.tab`.
 
 The included GitHub Actions workflow builds on every push, pull request, and manual run. A `v*` tag additionally builds, signs, and attaches the release APK to the GitHub Release when the four signing secrets are configured.
 

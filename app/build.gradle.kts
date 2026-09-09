@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
 }
 
-val appVersion = "2.0.0"
+val appVersion = "2.1.0"
 
 android {
     namespace = "my.MrxSiN.twitterhideads"
@@ -12,7 +12,7 @@ android {
         applicationId = "my.MrxSiN.twitterhideads"
         minSdk = 26
         targetSdk = 36
-        versionCode = 31
+        versionCode = 32
         versionName = appVersion
     }
 
