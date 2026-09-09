@@ -4,15 +4,42 @@ plugins {
 
 val appVersion = "2.1.0"
 
+val envKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+val envKeystoreAlias = System.getenv("ANDROID_KEYSTORE_ALIAS")
+val envKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+val envKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+
 android {
     namespace = "my.MrxSiN.twitterhideads"
     compileSdk = 36
 
+    /*
+     * Release signing is supplied by the environment so that no credential ever
+     * reaches version control. Local builds without those variables stay
+     * unsigned instead of failing.
+     */
+    val releaseSigningConfig = if (
+        !envKeystorePath.isNullOrBlank() &&
+        !envKeystoreAlias.isNullOrBlank() &&
+        !envKeystorePassword.isNullOrBlank() &&
+        !envKeyPassword.isNullOrBlank() &&
+        file(envKeystorePath).isFile
+    ) {
+        signingConfigs.create("release") {
+            storeFile = file(envKeystorePath)
+            storePassword = envKeystorePassword
+            keyAlias = envKeystoreAlias
+            keyPassword = envKeyPassword
+        }
+    } else {
+        null
+    }
+
     defaultConfig {
-        applicationId = "my.MrxSiN.twitterhideads"
+        applicationId = "io.github.mrxsin.twitterhideads"
         minSdk = 26
         targetSdk = 36
-        versionCode = 32
+        versionCode = 33
         versionName = appVersion
     }
 
@@ -20,6 +47,7 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles("proguard-rules.pro")
+            releaseSigningConfig?.let { signingConfig = it }
         }
     }
 
