@@ -25,7 +25,7 @@ for file in "$APP_GRADLE" "$WORKFLOW" "$MANIFEST" "$INIT" "$RUNTIME" "$BLOCKER" 
 done
 
 grep -q 'val appVersion = "2.1.0"' "$APP_GRADLE"
-grep -q 'versionCode = 32' "$APP_GRADLE"
+grep -q 'versionCode = 33' "$APP_GRADLE"
 grep -q 'compileOnly("io.github.libxposed:api:102.0.0")' "$APP_GRADLE"
 grep -q 'implementation("org.luckypray:dexkit:2.2.0")' "$APP_GRADLE"
 grep -q 'merges += "META-INF/xposed/\*"' "$APP_GRADLE"
