@@ -10,7 +10,7 @@ import io.github.libxposed.api.XposedModule;
 
 /** Modern Xposed API entry point. Scoped to com.twitter.android. */
 public final class ModuleMain extends XposedModule {
-    private static final String MODULE_VERSION = "2.0.0";
+    private static final String MODULE_VERSION = "2.1.0";
 
     private static final AtomicBoolean ATTACH_HOOK_INSTALLED =
             new AtomicBoolean(false);

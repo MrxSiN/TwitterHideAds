@@ -1,6 +1,6 @@
 {
   "schemaVersion": 7,
-  "moduleVersion": "2.0.0",
+  "moduleVersion": "2.1.0",
   "releaseChannel": "stable",
   "targetPackage": "com.twitter.android",
   "exactProfiles": [
@@ -27,11 +27,16 @@
     "failOpenOnAmbiguity": true
   },
   "strongSignals": [
-    "any direct String field starts with promoted-",
-    "any direct object field has runtime class com.x.models.TimelinePromotedMetadata"
+    "any direct String field carries the promoted- token at the start or at a - segment boundary",
+    "any direct object field whose runtime class name ends with PromotedMetadata"
   ],
+  "entryIdForms": {
+    "home": "promoted-tweet-<id>-<hash>",
+    "postDetail": "conversationthread-<id>-promoted-tweet-<id>-<hash>",
+    "search": "search-conversation-<id>-promoted-tweet-<id>-<hash>"
+  },
   "videoDatasetFilter": {
-    "enforcement": "active-test",
+    "enforcement": "active",
     "resolver": "single structural pre-pager URT state-copy method",
     "runtimeScope": "caller stack must include com.x.video.tab",
     "input": "mixed Kotlin immutable list containing normal and promoted UrtTimelinePost items",
