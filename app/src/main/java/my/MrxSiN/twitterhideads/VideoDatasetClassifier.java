@@ -6,163 +6,201 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Direct, bounded classifier for items in the Video Tab paging batch. */
+/**
+ * Host side of the Video Tab paging-batch policy.
+ *
+ * The host enumerates the batch and sends each item's facts (whether its
+ * class can hold a post, whether it carries a promoted-metadata model, its
+ * map key and text fields) in one OP_VIDEO_BATCH request. {@code post.bf}
+ * returns every item's class and whether the batch is a safe mixed batch
+ * (docs/policy/post.md). Rebuilding the collection stays here and in
+ * {@link PersistentListCopier}.
+ */
 final class VideoDatasetClassifier {
-    private static final int MAX_ITEMS = 128;
+    private static final int MAX_LOGGED_IDS = 12;
+    private static final int TALLY_WINDOW = 128;
     private static final ConcurrentHashMap<Class<?>, Access> ACCESS_CACHE =
             new ConcurrentHashMap<>();
 
     private VideoDatasetClassifier() {
     }
 
+    /**
+     * Classifies every item of {@code container}. A container that is not a
+     * collection, map or array, holds more than {@link BfAbi#MAX_ITEMS}
+     * items, or whose request fails yields {@link Batch#NONE}.
+     */
     static Batch inspect(Object container) {
         int size = sizeOf(container);
         if (size < 0) {
             return Batch.NONE;
         }
-
-        int items = 0;
-        int promoted = 0;
-        int normal = 0;
-        LinkedHashSet<String> promotedIds = new LinkedHashSet<>();
-        LinkedHashSet<String> normalIds = new LinkedHashSet<>();
-
+        if (size > BfAbi.MAX_ITEMS) {
+            return Batch.NONE;
+        }
+        Object[] items = new Object[size];
+        Object[] keys = container instanceof Map<?, ?> ? new Object[size] : null;
+        int count = 0;
         if (container instanceof Map<?, ?>) {
-            int examined = 0;
             for (Map.Entry<?, ?> entry : ((Map<?, ?>) container).entrySet()) {
-                if (examined++ >= MAX_ITEMS) {
-                    break;
+                if (count == size) {
+                    return Batch.NONE;
                 }
-                Classification classification = classify(entry.getValue(), identifier(entry.getKey()));
-                if (!classification.postItem) {
-                    continue;
-                }
-                items++;
-                if (classification.promoted) {
-                    promoted++;
-                    addLimited(promotedIds, classification.displayId());
-                } else if (classification.normal) {
-                    normal++;
-                    addLimited(normalIds, classification.displayId());
-                }
+                keys[count] = entry.getKey();
+                items[count++] = entry.getValue();
             }
         } else if (container instanceof Iterable<?>) {
-            int examined = 0;
-            for (Object item : (Iterable<?>) container) {
-                if (examined++ >= MAX_ITEMS) {
-                    break;
+            Iterator<?> iterator = ((Iterable<?>) container).iterator();
+            while (iterator.hasNext()) {
+                if (count == size) {
+                    return Batch.NONE;
                 }
-                Classification classification = classify(item, null);
-                if (!classification.postItem) {
-                    continue;
-                }
-                items++;
-                if (classification.promoted) {
-                    promoted++;
-                    addLimited(promotedIds, classification.displayId());
-                } else if (classification.normal) {
-                    normal++;
-                    addLimited(normalIds, classification.displayId());
-                }
+                items[count++] = iterator.next();
             }
-        } else if (container != null && container.getClass().isArray()) {
-            int length = Math.min(Array.getLength(container), MAX_ITEMS);
-            for (int index = 0; index < length; index++) {
-                Classification classification = classify(Array.get(container, index), null);
-                if (!classification.postItem) {
-                    continue;
-                }
-                items++;
-                if (classification.promoted) {
-                    promoted++;
-                    addLimited(promotedIds, classification.displayId());
-                } else if (classification.normal) {
-                    normal++;
-                    addLimited(normalIds, classification.displayId());
-                }
+        } else {
+            for (; count < size; count++) {
+                items[count] = Array.get(container, count);
             }
         }
-
-        return new Batch(
-                size,
-                items,
-                promoted,
-                normal,
-                promotedIds,
-                normalIds
-        );
+        return request(size, items, keys, count);
     }
 
-    static boolean isPromoted(Object item) {
-        return classify(item, null).promoted;
+    private static Batch request(int size, Object[] items, Object[] keys, int count) {
+        int[] refStart = new int[count];
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_VIDEO_BATCH);
+        try {
+            frame.u16(size);
+            frame.u8(count);
+            for (int index = 0; index < count; index++) {
+                refStart[index] = frame.refCount;
+                if (!encode(frame, items[index], keys == null ? null : keys[index])) {
+                    return Batch.NONE;
+                }
+            }
+            if (!frame.send(BfAbi.PROG_POST, 2 * count + 4)) {
+                return Batch.NONE;
+            }
+            int[] classes = new int[count];
+            String[] ids = new String[count];
+            for (int index = 0; index < count; index++) {
+                int cls = frame.out(2 * index);
+                int entry = frame.out(2 * index + 1);
+                if (cls != 0 && cls != (BfAbi.VI_POST | BfAbi.VI_PROMOTED)
+                        && cls != (BfAbi.VI_POST | BfAbi.VI_NORMAL)
+                        && cls != BfAbi.VI_POST) {
+                    return Batch.NONE;
+                }
+                classes[index] = cls;
+                int ref = entry == BfAbi.MAP_KEY_INDEX ? refStart[index]
+                        : entry == BfAbi.NO_INDEX ? -1
+                        : refStart[index] + entry + (hasTextKey(keys, index) ? 1 : 0);
+                ids[index] = ref >= 0 && ref < frame.refCount ? frame.refs[ref].toString() : null;
+            }
+            int base = 2 * count;
+            return new Batch(size, frame.out(base), frame.out(base + 1), frame.out(base + 2),
+                    frame.out(base + 3) == 1, classes, ids, items);
+        } finally {
+            frame.release();
+        }
     }
 
-    static Classification classify(Object item, String mapKeyId) {
+    private static boolean hasTextKey(Object[] keys, int index) {
+        return keys != null && keys[index] instanceof CharSequence;
+    }
+
+    /** One item: POSS, then metadata, key flag, field count, key, fields. */
+    private static boolean encode(PolicyFrame frame, Object item, Object key) {
         if (item == null) {
-            return Classification.NONE;
+            frame.u8(0);
+            return true;
         }
         Access access = ACCESS_CACHE.computeIfAbsent(item.getClass(), Access::resolve);
         if (!access.possiblePostItem) {
-            return Classification.NONE;
+            frame.u8(0);
+            return true;
         }
-
-        String entryId = mapKeyId;
         boolean metadata = false;
-        for (Field field : access.stringFields) {
-            Object value = read(field, item);
-            String candidate = identifier(value);
-            if (candidate == null) {
-                continue;
-            }
-            if (entryId == null || startsPromoted(candidate)) {
-                entryId = candidate;
-            }
-        }
         for (Field field : access.objectFields) {
-            Object value = read(field, item);
-            if (value != null && isPromotedMetadataType(value.getClass().getName())) {
+            if (PromotedMetadata.isInstance(Reflect.read(field, item))) {
                 metadata = true;
                 break;
             }
         }
-
-        boolean promotedId = entryId != null && startsPromoted(entryId);
-        boolean normalId = entryId != null
-                && entryId.toLowerCase(Locale.ROOT).startsWith("tweet-");
-        if (!promotedId && !normalId && !metadata) {
-            return Classification.NONE;
+        boolean textKey = key instanceof CharSequence;
+        frame.u8(1);
+        frame.bool(metadata);
+        frame.bool(textKey);
+        int countAt = frame.position();
+        frame.u8(0);
+        if (textKey) {
+            if (!frame.ref(key)) {
+                return false;
+            }
+            frame.entryText((CharSequence) key);
         }
-        return new Classification(
-                true,
-                promotedId || metadata,
-                normalId && !metadata,
-                entryId,
-                item.getClass().getName()
-        );
+        int fields = 0;
+        for (Field field : access.stringFields) {
+            Object value = Reflect.read(field, item);
+            if (!(value instanceof CharSequence)) {
+                continue;
+            }
+            if (fields + (textKey ? 1 : 0) >= BfAbi.MAX_FIELDS || !frame.ref(value)) {
+                return false;
+            }
+            frame.entryText((CharSequence) value);
+            fields++;
+        }
+        frame.patch(countAt, fields);
+        return true;
     }
 
-    static List<Object> filteredElements(Object container) {
+    /** Single-item classification (tests and diagnostics). */
+    static Classification classify(Object item, CharSequence mapKey) {
+        Batch batch = request(1, new Object[]{item}, mapKey == null ? null : new Object[]{mapKey}, 1);
+        if (batch == Batch.NONE) {
+            return Classification.NONE;
+        }
+        int cls = batch.classes[0];
+        if ((cls & BfAbi.VI_POST) == 0) {
+            return Classification.NONE;
+        }
+        return new Classification(true, (cls & BfAbi.VI_PROMOTED) != 0, (cls & BfAbi.VI_NORMAL) != 0,
+                batch.ids[0], item.getClass().getName());
+    }
+
+    /**
+     * The items of {@code container} the policy keeps, in order. Map
+     * containers are never rebuilt (empty result, so the caller's size check
+     * fails open); a batch that could not be classified keeps everything.
+     */
+    static List<Object> filteredElements(Object container, Batch batch) {
         ArrayList<Object> filtered = new ArrayList<>();
-        if (container instanceof Iterable<?>) {
-            for (Object item : (Iterable<?>) container) {
-                if (!isPromoted(item)) {
+        if (container instanceof Map<?, ?> || (!(container instanceof Iterable<?>)
+                && (container == null || !container.getClass().isArray()))) {
+            return filtered;
+        }
+        if (batch.items == null) {
+            if (container instanceof Iterable<?>) {
+                for (Object item : (Iterable<?>) container) {
                     filtered.add(item);
+                }
+            } else {
+                for (int index = 0; index < Array.getLength(container); index++) {
+                    filtered.add(Array.get(container, index));
                 }
             }
-        } else if (container != null && container.getClass().isArray()) {
-            int length = Array.getLength(container);
-            for (int index = 0; index < length; index++) {
-                Object item = Array.get(container, index);
-                if (!isPromoted(item)) {
-                    filtered.add(item);
-                }
+            return filtered;
+        }
+        for (int index = 0; index < batch.items.length; index++) {
+            if ((batch.classes[index] & BfAbi.VI_PROMOTED) == 0) {
+                filtered.add(batch.items[index]);
             }
         }
         return filtered;
@@ -181,68 +219,22 @@ final class VideoDatasetClassifier {
         return -1;
     }
 
-    private static boolean startsPromoted(String value) {
-        return value.toLowerCase(Locale.ROOT).startsWith("promoted-");
-    }
-
-    private static String identifier(Object value) {
-        if (!(value instanceof CharSequence)) {
-            return null;
-        }
-        String text = value.toString();
-        String lower = text.toLowerCase(Locale.ROOT);
-        return lower.startsWith("tweet-") || lower.startsWith("promoted-")
-                ? text
-                : null;
-    }
-
-    private static boolean isPromotedMetadataType(String typeName) {
-        return BundledAdPatterns.PROMOTED_METADATA_CLASS.equals(typeName)
-                || typeName.endsWith(".TimelinePromotedMetadata")
-                || typeName.contains("PromotedMetadata");
-    }
-
-    private static Object read(Field field, Object owner) {
-        try {
-            field.setAccessible(true);
-            return field.get(owner);
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static Field[] allFields(Class<?> type) {
-        ArrayList<Field> fields = new ArrayList<>();
-        Class<?> current = type;
-        while (current != null && current != Object.class) {
-            Collections.addAll(fields, current.getDeclaredFields());
-            current = current.getSuperclass();
-        }
-        return fields.toArray(new Field[0]);
-    }
-
-    private static void addLimited(Set<String> target, String value) {
-        if (value != null && target.size() < 12) {
-            target.add(value);
-        }
-    }
-
     private static final class Access {
         final boolean possiblePostItem;
-        final List<Field> stringFields;
-        final List<Field> objectFields;
+        final Field[] stringFields;
+        final Field[] objectFields;
 
         Access(boolean possiblePostItem, List<Field> stringFields, List<Field> objectFields) {
             this.possiblePostItem = possiblePostItem;
-            this.stringFields = stringFields;
-            this.objectFields = objectFields;
+            this.stringFields = stringFields.toArray(new Field[0]);
+            this.objectFields = objectFields.toArray(new Field[0]);
         }
 
         static Access resolve(Class<?> type) {
             ArrayList<Field> strings = new ArrayList<>();
             ArrayList<Field> objects = new ArrayList<>();
             boolean metadataField = false;
-            for (Field field : allFields(type)) {
+            for (Field field : Reflect.allFields(type)) {
                 if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
                     continue;
                 }
@@ -250,7 +242,7 @@ final class VideoDatasetClassifier {
                     strings.add(field);
                 } else {
                     objects.add(field);
-                    if (isPromotedMetadataType(field.getType().getName())) {
+                    if (PromotedMetadata.isType(field.getType().getName())) {
                         metadataField = true;
                     }
                 }
@@ -258,20 +250,12 @@ final class VideoDatasetClassifier {
             String name = type.getName();
             boolean postClass = name.startsWith("com.x.models.timelines.items.")
                     || name.startsWith("com.x.urt.items.post.");
-            return new Access(
-                    postClass || metadataField,
-                    Collections.unmodifiableList(strings),
-                    Collections.unmodifiableList(objects)
-            );
+            return new Access(postClass || metadataField, strings, objects);
         }
     }
 
     static final class Batch {
-        static final Batch NONE = new Batch(
-                -1, 0, 0, 0,
-                Collections.<String>emptySet(),
-                Collections.<String>emptySet()
-        );
+        static final Batch NONE = new Batch(-1, 0, 0, 0, false, null, null, null);
 
         final int containerSize;
         final int itemCount;
@@ -279,28 +263,50 @@ final class VideoDatasetClassifier {
         final int normalCount;
         final Set<String> promotedIds;
         final Set<String> normalIds;
+        private final boolean safe;
+        private final int[] classes;
+        private final String[] ids;
+        private final Object[] items;
 
-        Batch(
-                int containerSize,
-                int itemCount,
-                int promotedCount,
-                int normalCount,
-                Set<String> promotedIds,
-                Set<String> normalIds
-        ) {
+        Batch(int containerSize, int itemCount, int promotedCount, int normalCount, boolean safe,
+              int[] classes, String[] ids, Object[] items) {
             this.containerSize = containerSize;
             this.itemCount = itemCount;
             this.promotedCount = promotedCount;
             this.normalCount = normalCount;
-            this.promotedIds = Collections.unmodifiableSet(new LinkedHashSet<>(promotedIds));
-            this.normalIds = Collections.unmodifiableSet(new LinkedHashSet<>(normalIds));
+            this.safe = safe;
+            this.classes = classes;
+            this.ids = ids;
+            this.items = items;
+            LinkedHashSet<String> promoted = new LinkedHashSet<>();
+            LinkedHashSet<String> normal = new LinkedHashSet<>();
+            if (classes != null) {
+                // Log sets: the tallied window only, as before.
+                for (int index = 0; index < Math.min(classes.length, TALLY_WINDOW); index++) {
+                    if ((classes[index] & BfAbi.VI_PROMOTED) != 0) {
+                        addLimited(promoted, display(ids[index], items[index]));
+                    } else if ((classes[index] & BfAbi.VI_NORMAL) != 0) {
+                        addLimited(normal, display(ids[index], items[index]));
+                    }
+                }
+            }
+            this.promotedIds = Collections.unmodifiableSet(promoted);
+            this.normalIds = Collections.unmodifiableSet(normal);
         }
 
+        private static String display(String id, Object item) {
+            return id != null ? id : "metadata-only:" + item.getClass().getName();
+        }
+
+        private static void addLimited(Set<String> target, String value) {
+            if (target.size() < MAX_LOGGED_IDS) {
+                target.add(value);
+            }
+        }
+
+        /** The policy's safe-mixed-batch decision. */
         boolean safeMixedVideoBatch() {
-            return containerSize >= 3
-                    && itemCount >= 2
-                    && promotedCount > 0
-                    && normalCount > 0;
+            return safe;
         }
     }
 

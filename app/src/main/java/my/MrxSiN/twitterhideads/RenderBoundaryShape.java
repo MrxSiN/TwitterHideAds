@@ -14,16 +14,15 @@ import java.lang.reflect.Modifier;
  *   static void render(Model, Modifier, LayoutScope, Composer, int)
  *   static void render(Model, Modifier, LayoutScope, Composer, int, int)
  *
- * Only the trailing shape is fixed by the compiler. Everything before the
- * {@code Composer} is source-defined and therefore moves between X releases,
- * so parameters are matched by role rather than by position. X 12.7.1 through
- * 12.9.1 passed a post dependency alongside the model; 12.22.0 dropped it.
- * Both remain acceptable here.
+ * Only the trailing shape is fixed by the compiler; parameters before the
+ * {@code Composer} are matched by role. This class reduces a method to those
+ * facts (modifiers, declaring package, one role per parameter). Eligibility,
+ * the score and the acceptance threshold are decided by
+ * {@code brainfuck/src/discovery.bf} (OP_RENDER_BOUNDARY, docs/policy/discovery.md).
  *
  * A boundary is identified by the post model it renders, not by where it is
- * declared. X 12.22.0 renders the home timeline from
- * {@code com.x.jetfuel.v2.element.attribute}, so requiring the declaring class
- * to sit in the post package hid the only boundary that matters.
+ * declared: X 12.22.0 renders the home timeline from
+ * {@code com.x.jetfuel.v2.element.attribute}.
  */
 final class RenderBoundaryShape {
     /** Package holding the post render boundaries, without a trailing dot. */
@@ -31,110 +30,76 @@ final class RenderBoundaryShape {
 
     static final String POST_PACKAGE = POST_PACKAGE_ROOT + ".";
 
-    private static final String COMPOSER = "androidx.compose.runtime.Composer";
+    static final String COMPOSER = "androidx.compose.runtime.Composer";
     private static final String MODIFIER_PREFIX = "androidx.compose.ui.Modifier";
     private static final String LAYOUT_PREFIX = "androidx.compose.foundation.layout.";
-
-
-    private static final int SCORE_STATIC = 25;
-    private static final int SCORE_VOID = 25;
-    private static final int SCORE_DIRECT_PACKAGE = 80;
-    private static final int SCORE_NESTED_PACKAGE = 25;
-    private static final int SCORE_MODEL_PACKAGE = 80;
-    private static final int SCORE_COMPOSER = 60;
-    private static final int SCORE_MODIFIER = 35;
-    private static final int SCORE_LAYOUT_SCOPE = 35;
-    private static final int SCORE_POST_DEPENDENCY = 20;
-    private static final int SCORE_TRAILING_MASKS = 25;
-    private static final int SCORE_SHORT_NAME = 10;
-    private static final int SCORE_MODEL_INTERFACE = 15;
-
-    private RenderBoundaryShape() {
-    }
-
-    /**
-     * Scores {@code method} as a render boundary, or returns
-     * {@link #NOT_A_BOUNDARY} when its structure rules it out.
-     */
-    static int score(Method method) {
-        if (!isStructurallyEligible(method)) {
-            return NOT_A_BOUNDARY;
-        }
-
-        Class<?>[] parameters = method.getParameterTypes();
-        String declaring = method.getDeclaringClass().getName();
-        Class<?> model = parameters[0];
-
-        int score = SCORE_STATIC
-                + SCORE_VOID
-                + SCORE_COMPOSER
-                + SCORE_TRAILING_MASKS
-                + SCORE_MODEL_PACKAGE;
-        score += isDirectlyInPostPackage(declaring)
-                ? SCORE_DIRECT_PACKAGE
-                : SCORE_NESTED_PACKAGE;
-        score += model.isInterface() ? SCORE_MODEL_INTERFACE : 0;
-        score += method.getName().length() <= 2 ? SCORE_SHORT_NAME : 0;
-
-        int composerIndex = composerIndex(parameters);
-        boolean modifier = false;
-        boolean layoutScope = false;
-        boolean postDependency = false;
-        for (int index = 1; index < composerIndex; index++) {
-            String name = parameters[index].getName();
-            modifier |= name.startsWith(MODIFIER_PREFIX);
-            layoutScope |= name.startsWith(LAYOUT_PREFIX);
-            postDependency |= name.startsWith(POST_PACKAGE);
-        }
-        score += modifier ? SCORE_MODIFIER : 0;
-        score += layoutScope ? SCORE_LAYOUT_SCOPE : 0;
-        score += postDependency ? SCORE_POST_DEPENDENCY : 0;
-
-        return score;
-    }
 
     /** Sentinel returned by {@link #score(Method)} for a non-boundary. */
     static final int NOT_A_BOUNDARY = -1;
 
-    private static boolean isStructurallyEligible(Method method) {
-        int modifiers = method.getModifiers();
-        if (!Modifier.isStatic(modifiers)
-                || Modifier.isAbstract(modifiers)
-                || Modifier.isNative(modifiers)
-                || method.isSynthetic()
-                || method.getReturnType() != Void.TYPE) {
-            return false;
-        }
-        Class<?>[] parameters = method.getParameterTypes();
-        int composerIndex = composerIndex(parameters);
-        if (composerIndex < 1) {
-            return false;
-        }
-        if (!parameters[0].getName().startsWith(POST_PACKAGE)) {
-            return false;
-        }
-
-        // Exactly the compiler-generated $changed mask, optionally followed by
-        // the $default mask. Anything else is not a composable entry point.
-        int trailing = parameters.length - composerIndex - 1;
-        if (trailing < 1 || trailing > 2) {
-            return false;
-        }
-        for (int index = composerIndex + 1; index < parameters.length; index++) {
-            if (parameters[index] != Integer.TYPE) {
-                return false;
-            }
-        }
-        return true;
+    private RenderBoundaryShape() {
     }
 
-    private static int composerIndex(Class<?>[] parameters) {
-        for (int index = 0; index < parameters.length; index++) {
-            if (COMPOSER.equals(parameters[index].getName())) {
-                return index;
-            }
+    /** The boundary score, or {@link #NOT_A_BOUNDARY}. */
+    static int score(Method method) {
+        int result = evaluate(method);
+        return result < 0 ? NOT_A_BOUNDARY : result & 0xFFFF;
+    }
+
+    /** True for an eligible boundary whose score reaches the policy threshold. */
+    static boolean accepts(Method method) {
+        int result = evaluate(method);
+        return result >= 0 && (result & 0x10000) != 0;
+    }
+
+    /** -1 when ineligible, else score | accepted << 16. */
+    private static int evaluate(Method method) {
+        Class<?>[] parameters = method.getParameterTypes();
+        if (parameters.length > 255) {
+            return -1;
         }
-        return -1;
+        int modifiers = method.getModifiers();
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_RENDER_BOUNDARY);
+        try {
+            frame.bool(Modifier.isStatic(modifiers));
+            frame.bool(Modifier.isAbstract(modifiers));
+            frame.bool(Modifier.isNative(modifiers));
+            frame.bool(method.isSynthetic());
+            frame.bool(method.getReturnType() == Void.TYPE);
+            frame.bool(isDirectlyInPostPackage(method.getDeclaringClass().getName()));
+            frame.bool(parameters.length > 0 && parameters[0].isInterface());
+            frame.bool(method.getName().length() <= 2);
+            frame.u8(parameters.length);
+            for (Class<?> parameter : parameters) {
+                frame.u8(role(parameter));
+            }
+            if (!frame.send(BfAbi.PROG_DISCOVERY, 4) || frame.out(0) != 1) {
+                return -1;
+            }
+            return frame.out16(1) | (frame.out(3) == 1 ? 0x10000 : 0);
+        } finally {
+            frame.release();
+        }
+    }
+
+    static int role(Class<?> parameter) {
+        if (parameter == Integer.TYPE) {
+            return BfAbi.R_INT;
+        }
+        String name = parameter.getName();
+        if (COMPOSER.equals(name)) {
+            return BfAbi.R_COMPOSER;
+        }
+        if (name.startsWith(MODIFIER_PREFIX)) {
+            return BfAbi.R_MODIFIER;
+        }
+        if (name.startsWith(LAYOUT_PREFIX)) {
+            return BfAbi.R_LAYOUT;
+        }
+        if (name.startsWith(POST_PACKAGE)) {
+            return BfAbi.R_POST;
+        }
+        return BfAbi.R_OTHER;
     }
 
     private static boolean isDirectlyInPostPackage(String className) {

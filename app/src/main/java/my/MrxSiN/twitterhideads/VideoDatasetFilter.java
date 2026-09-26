@@ -1,12 +1,7 @@
 package my.MrxSiN.twitterhideads;
 
-import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -66,18 +61,21 @@ final class VideoDatasetFilter {
     ) {
         try {
             List<Object> args = chain.getArgs();
-            if (args.size() < 2 || !calledFromVideoTab()) {
+            if (args.size() < 2) {
                 return null;
             }
+            // The batch check is bounded and field-cached; capturing a stack
+            // is not, so the caller is only inspected for mixed batches that
+            // would actually be rewritten.
             Object original = args.get(1);
             VideoDatasetClassifier.Batch batch = VideoDatasetClassifier.inspect(original);
-            if (!batch.safeMixedVideoBatch()) {
+            if (!batch.safeMixedVideoBatch() || !calledFromVideoTab()) {
                 return null;
             }
 
-            List<Object> filteredElements = VideoDatasetClassifier.filteredElements(original);
+            List<Object> filteredElements = VideoDatasetClassifier.filteredElements(original, batch);
             int removed = batch.containerSize - filteredElements.size();
-            if (removed <= 0 || filteredElements.size() < batch.normalCount) {
+            if (!proceedToCopy(batch.containerSize, filteredElements.size(), batch.normalCount)) {
                 return null;
             }
 
@@ -94,9 +92,8 @@ final class VideoDatasetFilter {
             }
 
             VideoDatasetClassifier.Batch verified = VideoDatasetClassifier.inspect(replacement);
-            if (verified.promotedCount != 0
-                    || verified.normalCount < batch.normalCount
-                    || verified.containerSize != filteredElements.size()) {
+            if (verified.containerSize < 0 || !acceptVerified(filteredElements.size(), batch.normalCount,
+                    verified.promotedCount, verified.normalCount, verified.containerSize)) {
                 log("Video dataset replacement rejected by verification; fail-open mode active");
                 return null;
             }
@@ -111,7 +108,7 @@ final class VideoDatasetFilter {
                     + ", originalSize=" + batch.containerSize
                     + ", filteredSize=" + verified.containerSize
                     + ", removed=" + removed
-                    + ", promotedIds=" + batch.promotedIds);
+                    + ", promotedIds=" + redacted(batch.promotedIds));
             return replacementArgs;
         } catch (Throwable throwable) {
             int error = FILTER_ERRORS.incrementAndGet();
@@ -124,10 +121,11 @@ final class VideoDatasetFilter {
     }
 
     private static boolean calledFromVideoTab() {
-        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        StackTraceElement[] stack = new Throwable().getStackTrace();
+        int limit = PolicyLimits.stackFrames();
         int examined = 0;
         for (StackTraceElement element : stack) {
-            if (++examined > 48) {
+            if (++examined > limit) {
                 break;
             }
             if (element.getClassName().startsWith("com.x.video.tab.")) {
@@ -137,6 +135,48 @@ final class VideoDatasetFilter {
         return false;
     }
 
+    /** OP_VIDEO_DECIDE, copy stage: something is removed and every organic item survives. */
+    static boolean proceedToCopy(int containerSize, int filteredSize, int normalCount) {
+        if (containerSize < 0 || containerSize > 0xFFFF || filteredSize > 0xFFFF) {
+            return false;
+        }
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_VIDEO_DECIDE);
+        try {
+            frame.u8(BfAbi.VD_COPY);
+            frame.u16(containerSize);
+            frame.u16(filteredSize);
+            frame.u8(Math.min(normalCount, 255));
+            return frame.send(BfAbi.PROG_POST, 1) && frame.out(0) == 1;
+        } finally {
+            frame.release();
+        }
+    }
+
+    /** OP_VIDEO_DECIDE, verify stage: the rebuilt list holds exactly the kept items. */
+    static boolean acceptVerified(int filteredSize, int normalCount, int verifiedPromoted,
+                                  int verifiedNormal, int verifiedSize) {
+        if (filteredSize > 0xFFFF || verifiedSize > 0xFFFF) {
+            return false;
+        }
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_VIDEO_DECIDE);
+        try {
+            frame.u8(BfAbi.VD_VERIFY);
+            frame.u16(filteredSize);
+            frame.u8(Math.min(normalCount, 255));
+            frame.u8(Math.min(verifiedPromoted, 255));
+            frame.u8(Math.min(verifiedNormal, 255));
+            frame.u16(verifiedSize);
+            return frame.send(BfAbi.PROG_POST, 1) && frame.out(0) == 1;
+        } finally {
+            frame.release();
+        }
+    }
+
+    /**
+     * An {@link ArrayList} when the declared type accepts one, otherwise a
+     * copy through the persistent list's own builder. Anything else fails
+     * open rather than emulating an immutable-collection interface.
+     */
     private static Object createCompatibleCopy(
             Object original,
             Class<?> declaredType,
@@ -145,135 +185,15 @@ final class VideoDatasetFilter {
         if (declaredType.isAssignableFrom(ArrayList.class)) {
             return new ArrayList<>(filtered);
         }
-
-        Object built = buildThroughPersistentBuilder(original, declaredType, filtered);
-        if (built != null) {
-            return built;
-        }
-
-        if (declaredType.isInterface()) {
-            return proxyList(declaredType, filtered);
-        }
-        return null;
+        return PersistentListCopier.copy(original, declaredType, filtered);
     }
 
-    private static Object buildThroughPersistentBuilder(
-            Object original,
-            Class<?> declaredType,
-            List<Object> filtered
-    ) {
-        for (Method method : publicAndDeclaredMethods(original.getClass())) {
-            if (method.getParameterTypes().length != 0
-                    || !List.class.isAssignableFrom(method.getReturnType())) {
-                continue;
-            }
-            Object builder;
-            try {
-                method.setAccessible(true);
-                builder = method.invoke(original);
-            } catch (Throwable ignored) {
-                continue;
-            }
-            if (!(builder instanceof List<?>) || builder == original) {
-                continue;
-            }
-
-            @SuppressWarnings("unchecked")
-            List<Object> mutable = (List<Object>) builder;
-            try {
-                mutable.clear();
-                mutable.addAll(filtered);
-            } catch (Throwable ignored) {
-                continue;
-            }
-
-            for (Method build : publicAndDeclaredMethods(builder.getClass())) {
-                if (build.getParameterTypes().length != 0
-                        || !declaredType.isAssignableFrom(build.getReturnType())) {
-                    continue;
-                }
-                try {
-                    build.setAccessible(true);
-                    Object result = build.invoke(builder);
-                    if (result != null && declaredType.isInstance(result)) {
-                        return result;
-                    }
-                } catch (Throwable ignored) {
-                    // try the next no-argument build-like method
-                }
-            }
+    private static List<String> redacted(Set<String> entryIds) {
+        ArrayList<String> out = new ArrayList<>(entryIds.size());
+        for (String entryId : entryIds) {
+            out.add(LogPrivacy.entryId(entryId));
         }
-        return null;
-    }
-
-    private static List<Method> publicAndDeclaredMethods(Class<?> type) {
-        LinkedHashSet<Method> methods = new LinkedHashSet<>();
-        Collections.addAll(methods, type.getMethods());
-        Class<?> current = type;
-        while (current != null && current != Object.class) {
-            Collections.addAll(methods, current.getDeclaredMethods());
-            current = current.getSuperclass();
-        }
-        return new ArrayList<>(methods);
-    }
-
-    private static Object proxyList(Class<?> declaredType, List<Object> filtered) {
-        final List<Object> delegate = Collections.unmodifiableList(new ArrayList<>(filtered));
-        Set<Class<?>> interfaces = new LinkedHashSet<>();
-        interfaces.add(declaredType);
-        collectInterfaces(declaredType, interfaces);
-        interfaces.add(List.class);
-        return Proxy.newProxyInstance(
-                declaredType.getClassLoader(),
-                interfaces.toArray(new Class<?>[0]),
-                new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                        String name = method.getName();
-                        Class<?>[] parameters = method.getParameterTypes();
-                        if (method.getDeclaringClass() == Object.class) {
-                            if ("toString".equals(name)) {
-                                return delegate.toString();
-                            }
-                            if ("hashCode".equals(name)) {
-                                return delegate.hashCode();
-                            }
-                            if ("equals".equals(name)) {
-                                return proxy == (args == null ? null : args[0]);
-                            }
-                        }
-                        if (parameters.length == 0 && method.getReturnType() == Integer.TYPE) {
-                            return delegate.size();
-                        }
-                        if (parameters.length == 0 && method.getReturnType() == Boolean.TYPE) {
-                            return delegate.isEmpty();
-                        }
-                        if (parameters.length == 0
-                                && Iterator.class.isAssignableFrom(method.getReturnType())) {
-                            return delegate.iterator();
-                        }
-                        if (parameters.length == 1
-                                && parameters[0] == Integer.TYPE
-                                && method.getReturnType() != Void.TYPE) {
-                            return delegate.get((Integer) args[0]);
-                        }
-                        try {
-                            Method listMethod = List.class.getMethod(name, parameters);
-                            return listMethod.invoke(delegate, args);
-                        } catch (NoSuchMethodException ignored) {
-                            throw new UnsupportedOperationException("Unsupported immutable-list method: " + method);
-                        }
-                    }
-                }
-        );
-    }
-
-    private static void collectInterfaces(Class<?> type, Set<Class<?>> output) {
-        for (Class<?> iface : type.getInterfaces()) {
-            if (output.add(iface)) {
-                collectInterfaces(iface, output);
-            }
-        }
+        return out;
     }
 
     private static void log(String message) {

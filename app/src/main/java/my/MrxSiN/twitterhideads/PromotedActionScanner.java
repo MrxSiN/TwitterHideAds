@@ -15,23 +15,19 @@ import java.util.Set;
  * Bounded action-graph fallback used when a render model does not expose the
  * direct promoted signals {@link BundledAdPatterns} looks for, which happens
  * when the promoted-metadata class itself has been obfuscated away.
+ *
+ * The walk stays in Java (it is reflection). Every scalar it meets is handed,
+ * in batches, to {@code brainfuck/src/action.bf} (OP_ACTION_NAMES, specified
+ * in docs/policy/action.md), which decides whether the value names one of the
+ * promoted post actions.
  */
 final class PromotedActionScanner {
     static final String ACTION_ENUM_CLASS = "com.x.models.PostActionType";
 
-    static final Set<String> PROMOTED_ACTIONS;
-
-    private static final int MAX_DEPTH = 5;
-    private static final int MAX_OBJECTS = 160;
-    private static final int MAX_COLLECTION_ITEMS = 24;
-
-    static {
-        LinkedHashSet<String> actions = new LinkedHashSet<>();
-        actions.add("PromotedDismissAd");
-        actions.add("PromotedAdsInfo");
-        actions.add("PromotedReportAd");
-        PROMOTED_ACTIONS = Collections.unmodifiableSet(actions);
-    }
+    /** Names of the OP_ACTION_NAMES result codes, indexed by code. */
+    private static final String[] ACTION_NAMES = {
+            null, "PromotedDismissAd", "PromotedAdsInfo", "PromotedReportAd"
+    };
 
     private PromotedActionScanner() {
     }
@@ -41,25 +37,43 @@ final class PromotedActionScanner {
             return Match.NOT_USED;
         }
 
+        int maxDepth = PolicyLimits.scanDepth();
+        int maxObjects = PolicyLimits.scanObjects();
+        int maxCollectionItems = PolicyLimits.scanItems();
         ArrayDeque<Node> queue = new ArrayDeque<>();
         IdentityHashMap<Object, Boolean> visited = new IdentityHashMap<>();
         LinkedHashSet<String> matched = new LinkedHashSet<>();
         queue.add(new Node(root, 0));
 
+        Batch batch = new Batch(matched);
+        try {
+            walk(queue, visited, batch, maxDepth, maxObjects, maxCollectionItems);
+            batch.flush();
+        } finally {
+            batch.frame.release();
+        }
+        return new Match(true, !matched.isEmpty(), matched);
+    }
+
+    private static void walk(
+            ArrayDeque<Node> queue,
+            IdentityHashMap<Object, Boolean> visited,
+            Batch batch,
+            int maxDepth,
+            int maxObjects,
+            int maxCollectionItems
+    ) {
         int examined = 0;
-        while (!queue.isEmpty() && examined < MAX_OBJECTS) {
+        while (!queue.isEmpty() && examined < maxObjects) {
             Node node = queue.removeFirst();
             Object value = node.value;
-            if (value == null || node.depth > MAX_DEPTH) {
+            if (value == null || node.depth > maxDepth) {
                 continue;
             }
 
             Class<?> type = value.getClass();
             if (isScalar(type)) {
-                String action = promotedActionName(value);
-                if (action != null) {
-                    matched.add(action);
-                }
+                batch.add(value);
                 continue;
             }
             if (visited.put(value, Boolean.TRUE) != null) {
@@ -70,7 +84,7 @@ final class PromotedActionScanner {
             if (type.isArray()) {
                 int length = Math.min(
                         Array.getLength(value),
-                        MAX_COLLECTION_ITEMS
+                        maxCollectionItems
                 );
                 for (int index = 0; index < length; index++) {
                     queue.addLast(new Node(
@@ -83,7 +97,7 @@ final class PromotedActionScanner {
             if (value instanceof Collection<?>) {
                 int count = 0;
                 for (Object item : (Collection<?>) value) {
-                    if (count++ >= MAX_COLLECTION_ITEMS) {
+                    if (count++ >= maxCollectionItems) {
                         break;
                     }
                     queue.addLast(new Node(item, node.depth + 1));
@@ -93,7 +107,7 @@ final class PromotedActionScanner {
             if (value instanceof Map<?, ?>) {
                 int count = 0;
                 for (Object item : ((Map<?, ?>) value).values()) {
-                    if (count++ >= MAX_COLLECTION_ITEMS) {
+                    if (count++ >= maxCollectionItems) {
                         break;
                     }
                     queue.addLast(new Node(item, node.depth + 1));
@@ -114,34 +128,46 @@ final class PromotedActionScanner {
                 }
             }
         }
-
-        return new Match(true, !matched.isEmpty(), matched);
     }
 
-    private static String promotedActionName(Object value) {
-        Class<?> type = value.getClass();
-        String raw;
-        if (value instanceof Enum<?>) {
-            raw = ((Enum<?>) value).name();
-        } else {
-            raw = String.valueOf(value);
-            int hash = raw.lastIndexOf('#');
-            if (hash >= 0 && hash + 1 < raw.length()) {
-                raw = raw.substring(hash + 1);
+    /** Scalars awaiting OP_ACTION_NAMES, flushed every {@link BfAbi#MAX_ITEMS} values. */
+    private static final class Batch {
+        final PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_ACTION_NAMES);
+        final Set<String> matched;
+        int count;
+
+        Batch(Set<String> matched) {
+            this.matched = matched;
+            frame.u8(0);
+        }
+
+        void add(Object value) {
+            String raw = value instanceof Enum<?> ? ((Enum<?>) value).name() : String.valueOf(value);
+            frame.bool(value instanceof Enum<?>);
+            frame.bool(ACTION_ENUM_CLASS.equals(value.getClass().getName()));
+            frame.actionText(raw);
+            if (++count == BfAbi.MAX_ITEMS) {
+                flush();
             }
         }
 
-        if (PROMOTED_ACTIONS.contains(raw)) {
-            return raw;
-        }
-        if (ACTION_ENUM_CLASS.equals(type.getName())) {
-            for (String action : PROMOTED_ACTIONS) {
-                if (raw.endsWith(action)) {
-                    return action;
+        void flush() {
+            if (count == 0) {
+                return;
+            }
+            frame.patch(BfAbi.HEADER_SIZE, count);
+            if (frame.send(BfAbi.PROG_ACTION, count + 1)) {
+                for (int index = 0; index < count; index++) {
+                    int code = frame.out(index);
+                    if (code > BfAbi.ACT_NONE && code < ACTION_NAMES.length) {
+                        matched.add(ACTION_NAMES[code]);
+                    }
                 }
             }
+            frame.restart(BfAbi.OP_ACTION_NAMES);
+            frame.u8(0);
+            count = 0;
         }
-        return null;
     }
 
     private static boolean shouldTraverse(Class<?> type) {

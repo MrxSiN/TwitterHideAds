@@ -1,18 +1,19 @@
-# Twitter Hide Ads 2.1.0
+# Twitter Hide Ads 3.0.0
 
-Promoted posts are now suppressed on every X surface instead of only the Home timeline.
+TwitterHideAds now uses Brainfuck for its filtering and decision-policy core, while Android/Xposed integration remains Java/native.
 
-The post render boundaries are shared by all surfaces, so the hooks were already app-wide; classification was not. Only the Home timeline names a promoted entry `promoted-tweet-<id>-<hash>`. Every surface that nests a post inside a module prefixes that module's own entry, so the same advertisement arrives as `conversationthread-<id>-promoted-tweet-<id>-<hash>` in a post detail and as `search-conversation-<id>-promoted-tweet-<id>-<hash>` in search. Those compound identifiers failed the previous prefix match and rendered.
+The decisions — whether an entry identifier is promoted, organic or neither (including nested `conversationthread-…-promoted-tweet-…` and `search-conversation-…` identifiers), how entry, metadata and fallback evidence rank, which Video Tab entries are removed and when a rebuilt batch is accepted, which action names mark a promoted post, how render boundaries and the Video Tab method are scored and accepted, and which X versions have an exact profile — are hand-written Brainfuck programs, compiled ahead of time to native code. Hooks, DexKit discovery, reflection, caching and list rebuilding are unchanged Java.
 
-The classifier now matches the `promoted-` token at any `-` segment boundary, and recognises a promoted-metadata field by any runtime class name ending in `PromotedMetadata` rather than only the validated `com.x.models.TimelinePromotedMetadata`, which X has obfuscated away since 12.22.0.
+Behaviour is unchanged: the 2.1.0 Java policy is kept as a test oracle and the parity suite checks that old and new results are identical. Rendering got cheaper: one native call per post, no allocations, and on a Pixel 8 Pro about 2.4 µs per organic post instead of 14.9 µs.
+
+If the native policy core cannot load or a request fails, the module keeps the content (fail open).
 
 Expected success markers:
 
 ```text
+policyCore=brainfuck-aot abi=1.0
 enforcement=ACTIVE_ADAPTIVE
 Blocked promoted post before Compose
 ```
 
-Validated on X `12.23.1-prod.01` under Vector 2.2: 11 deoptimized boundaries installed, promoted entries blocked before render on both the Home timeline and post detail, with normal posts, replies and search results unaffected.
-
-Video Tab dataset filtering is unchanged. It installs one dynamically resolved URT dataset hook and does not hook Compose rendering, autoplay, media playback or player objects.
+Validated on X `12.28.0-prod.01` under Vector 2.2 (Pixel 8 Pro, Android 17): Home, post detail and Video Tab suppression, organic posts, replies, search and Video Tab paging.

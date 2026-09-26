@@ -9,26 +9,19 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.github.libxposed.api.XposedInterface;
 
 /** Exact and adaptively resolved pre-render promoted-post suppression. */
 public final class TwitterAdBlocker {
-    private static final int DETAILED_BLOCK_LOG_LIMIT = 3;
-    private static final int PERIODIC_LOG_INTERVAL = 50;
-
     private static final AtomicBoolean INSTALLED = new AtomicBoolean(false);
-    private static final AtomicInteger BLOCK_ATTEMPTS = new AtomicInteger();
-    private static final AtomicInteger UNIQUE_BLOCKS = new AtomicInteger();
+    private static final AtomicInteger REJECTED_BOUNDARIES = new AtomicInteger();
 
     private static final Set<String> HOOKED_MEMBERS =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
-    private static final Set<String> UNIQUE_BLOCK_KEYS =
-            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
-    private static final int BOUNDARY_OBSERVATION_LOG_LIMIT = 4;
-    private static final ConcurrentHashMap<String, AtomicInteger> BOUNDARY_OBSERVATIONS =
-            new ConcurrentHashMap<>();
+    private static final BlockRecorder BLOCKS = new BlockRecorder();
 
     private TwitterAdBlocker() {
     }
@@ -115,21 +108,28 @@ public final class TwitterAdBlocker {
         }
 
         int installed = 0;
-        int deoptimized = 0;
         for (Method method : resolution.methods) {
             String boundary = "adaptive-"
                     + simpleName(method.getDeclaringClass().getName())
                     + "." + method.getName();
-            if (!installResolvedBoundary(method, boundary, null, true)) {
+            if (!installResolvedBoundary(
+                    method,
+                    boundary,
+                    null,
+                    new BoundaryWitness(PolicyLimits.witnessWindow())
+            )) {
                 continue;
             }
             installed++;
-            // ART inlines these composables into their callers, which would
-            // otherwise keep running the compiled copy past the hook.
-            if (ModuleRuntime.deoptimize(method)) {
+            log("Installed pre-render boundary [" + boundary + "]: " + method);
+        }
+        // X's AOT code inlines these composables into their callers, which
+        // would otherwise keep running the inlined copy past the hook.
+        int deoptimized = 0;
+        for (Method caller : resolution.callers) {
+            if (ModuleRuntime.deoptimize(caller)) {
                 deoptimized++;
             }
-            log("Installed pre-render boundary [" + boundary + "]: " + method);
         }
         log("Initialization complete: resolver=adaptive"
                 + ", X=" + detectedVersion.displayName()
@@ -141,7 +141,10 @@ public final class TwitterAdBlocker {
                 + ", candidateCount=" + resolution.candidateCount
                 + ", enforcement=" + (installed > 0 ? "ACTIVE_ADAPTIVE" : "FAIL_OPEN_HOOK_ERROR")
                 + ", deoptimizeSupported=" + ModuleRuntime.isAttached()
-                + ", deoptimized=" + deoptimized);
+                + ", inlinedCallers=" + resolution.callers.size()
+                + ", deoptimized=" + deoptimized
+                + ", witnessWindow=" + PolicyLimits.witnessWindow()
+                + ", " + PolicyStats.summary());
     }
 
     private static int installExactBoundaryHooks(
@@ -167,7 +170,7 @@ public final class TwitterAdBlocker {
                     method,
                     boundary,
                     profile.expectedRenderModel,
-                    true
+                    null
             )) {
                 installed++;
                 log("Installed pre-render boundary [" + boundary + "]: " + method);
@@ -181,133 +184,129 @@ public final class TwitterAdBlocker {
      * {@link XposedInterface.Chain#proceed()}, which is how the modern API
      * declines to run the original void render call. Normal posts proceed
      * untouched.
+     *
+     * An adaptive boundary carries a {@link BoundaryWitness}; exact boundaries
+     * are validated per X version and pass {@code null}.
      */
     private static boolean installResolvedBoundary(
             final Method method,
             final String boundary,
             final String expectedRenderModel,
-            final boolean allowActionFallback
+            final BoundaryWitness witness
     ) {
-        return hookMemberOnce(method, chain -> {
+        final AtomicReference<XposedInterface.HookHandle> handle = new AtomicReference<>();
+        return hookMemberOnce(method, handle, chain -> {
+            if (witness != null && witness.state() == BoundaryWitness.State.REJECTED) {
+                return chain.proceed();
+            }
             List<Object> args = chain.getArgs();
             Object postModel = args.isEmpty() ? null : args.get(0);
             if (postModel == null) {
                 return chain.proceed();
             }
 
-            BundledAdPatterns.Classification classification =
-                    BundledAdPatterns.classifyTimelinePost(
-                            postModel,
-                            expectedRenderModel,
-                            allowActionFallback
-                    );
-            logBoundaryObservation(boundary, postModel, classification);
-            if (!classification.promoted) {
+            // One Brainfuck policy call; allocation-free unless the model
+            // needs the fallback walk or is blocked.
+            int result = BundledAdPatterns.classifyPacked(postModel, expectedRenderModel, true);
+            if (BlockRecorder.OBSERVE) {
+                BLOCKS.observe(boundary, postModel,
+                        BundledAdPatterns.classifyTimelinePost(postModel, expectedRenderModel, true));
+            }
+            if (witness != null) {
+                witness(boundary, witness, handle.get(), postModel,
+                        (result & BundledAdPatterns.IDENTIFIES_POST) != 0);
+            }
+            if ((result & BundledAdPatterns.PROMOTED) == 0) {
                 return chain.proceed();
             }
 
-            recordBlock(boundary, postModel, classification);
+            PolicyStats.blocked();
+            BLOCKS.record(boundary, postModel,
+                    BundledAdPatterns.classifyTimelinePost(postModel, expectedRenderModel, true));
             return null;
         });
     }
 
+    private static void witness(
+            String boundary,
+            BoundaryWitness witness,
+            XposedInterface.HookHandle handle,
+            Object postModel,
+            boolean identifiesPost
+    ) {
+        BoundaryWitness.State transition = witness.record(identifiesPost);
+        if (transition == BoundaryWitness.State.CONFIRMED) {
+            log("Boundary confirmed as post renderer: boundary=" + boundary
+                    + ", model=" + postModel.getClass().getName());
+        } else if (transition == BoundaryWitness.State.REJECTED) {
+            boolean unhooked = unhook(handle);
+            log("Boundary rejected after witness window: boundary=" + boundary
+                    + ", invocations=" + witness.observed()
+                    + ", lastModel=" + postModel.getClass().getName()
+                    + ", unhooked=" + unhooked
+                    + ", rejectedTotal=" + REJECTED_BOUNDARIES.incrementAndGet());
+        }
+    }
+
+    private static boolean unhook(XposedInterface.HookHandle handle) {
+        if (handle == null) {
+            return false;
+        }
+        try {
+            handle.unhook();
+            return true;
+        } catch (Throwable throwable) {
+            log("Unhook failed; boundary stays pass-through: "
+                    + Reflect.describeThrowable(throwable));
+            return false;
+        }
+    }
+
+    /**
+     * Facts about {@code method} for OP_EXACT_BOUNDARY; the rule itself is in
+     * discovery.bf. Any policy failure rejects the method (no hook).
+     */
     private static boolean isExactRenderBoundary(
             Method method,
             Class<?> postInterface,
             CompatibilityProfile.Profile profile,
             String expectedName
     ) {
-        int modifiers = method.getModifiers();
-        if (!expectedName.equals(method.getName())
-                || Modifier.isAbstract(modifiers)
-                || Modifier.isNative(modifiers)
-                || method.isSynthetic()
-                || method.getReturnType() != Void.TYPE) {
-            return false;
-        }
-
         Class<?>[] parameters = method.getParameterTypes();
-        if (parameters.length == 0 || parameters.length > 10) {
+        if (parameters.length > 255) {
             return false;
         }
-
-        Class<?> first = parameters[0];
-        boolean postArgument = postInterface != null
-                ? postInterface.isAssignableFrom(first)
-                : first.getName().equals(profile.expectedRenderModel)
-                || first.getName().startsWith(profile.postInterface);
-        if (!postArgument) {
-            return false;
+        boolean postArgument = false;
+        if (parameters.length > 0) {
+            Class<?> first = parameters[0];
+            postArgument = postInterface != null
+                    ? postInterface.isAssignableFrom(first)
+                    : first.getName().equals(profile.expectedRenderModel)
+                    || first.getName().startsWith(profile.postInterface);
         }
-
-        for (Class<?> parameter : parameters) {
-            if ("androidx.compose.runtime.Composer".equals(parameter.getName())) {
-                return true;
+        int modifiers = method.getModifiers();
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_EXACT_BOUNDARY);
+        try {
+            frame.bool(expectedName.equals(method.getName()));
+            frame.bool(Modifier.isAbstract(modifiers));
+            frame.bool(Modifier.isNative(modifiers));
+            frame.bool(method.isSynthetic());
+            frame.bool(method.getReturnType() == Void.TYPE);
+            frame.bool(postArgument);
+            frame.u8(parameters.length);
+            for (Class<?> parameter : parameters) {
+                frame.u8(RenderBoundaryShape.COMPOSER.equals(parameter.getName())
+                        ? BfAbi.R_COMPOSER : BfAbi.R_OTHER);
             }
-        }
-        return false;
-    }
-
-    private static int observationCount(String key) {
-        AtomicInteger seen = BOUNDARY_OBSERVATIONS.get(key);
-        if (seen == null) {
-            seen = new AtomicInteger();
-            AtomicInteger existing = BOUNDARY_OBSERVATIONS.putIfAbsent(key, seen);
-            if (existing != null) {
-                seen = existing;
-            }
-        }
-        return seen.incrementAndGet();
-    }
-
-    private static void logBoundaryObservation(
-            String boundary,
-            Object postModel,
-            BundledAdPatterns.Classification classification
-    ) {
-        if (observationCount(boundary) > BOUNDARY_OBSERVATION_LOG_LIMIT) {
-            return;
-        }
-        log("Boundary observation: boundary=" + boundary
-                + ", model=" + postModel.getClass().getName()
-                + ", promoted=" + classification.promoted
-                + ", entryId=" + safeEntryId(classification.entryId)
-                + ", signals=" + classification.signals
-                + ", actionFallbackUsed=" + classification.actionFallbackUsed);
-    }
-
-    private static void recordBlock(
-            String boundary,
-            Object postModel,
-            BundledAdPatterns.Classification classification
-    ) {
-        int attempts = BLOCK_ATTEMPTS.incrementAndGet();
-        String key = classification.stableLogKey(postModel);
-        boolean firstObservation = UNIQUE_BLOCK_KEYS.add(key);
-        int unique = firstObservation
-                ? UNIQUE_BLOCKS.incrementAndGet()
-                : UNIQUE_BLOCKS.get();
-
-        if (firstObservation && unique <= DETAILED_BLOCK_LOG_LIMIT) {
-            log("Blocked promoted post before Compose: boundary=" + boundary
-                    + ", attempts=" + attempts
-                    + ", unique=" + unique
-                    + ", entryId=" + safeEntryId(classification.entryId)
-                    + ", signals=" + classification.signals
-                    + ", actionFallbackUsed="
-                    + classification.actionFallbackUsed);
-            return;
-        }
-
-        if (attempts % PERIODIC_LOG_INTERVAL == 0) {
-            log("Block summary: attempts=" + attempts
-                    + ", unique=" + unique
-                    + ", activeBoundary=" + boundary);
+            return frame.send(BfAbi.PROG_DISCOVERY, 1) && frame.out(0) == 1;
+        } finally {
+            frame.release();
         }
     }
 
     private static boolean hookMemberOnce(
             Executable member,
+            AtomicReference<XposedInterface.HookHandle> handleOut,
             XposedInterface.Hooker hooker
     ) {
         String key = member.getDeclaringClass().getName() + "#" + member;
@@ -315,11 +314,13 @@ public final class TwitterAdBlocker {
             return false;
         }
         try {
-            if (ModuleRuntime.hook(member, hooker) == null) {
+            XposedInterface.HookHandle handle = ModuleRuntime.hook(member, hooker);
+            if (handle == null) {
                 HOOKED_MEMBERS.remove(key);
                 log("Hook failed for " + member + ": framework interface unavailable");
                 return false;
             }
+            handleOut.set(handle);
             return true;
         } catch (Throwable throwable) {
             HOOKED_MEMBERS.remove(key);
@@ -331,13 +332,6 @@ public final class TwitterAdBlocker {
     private static String simpleName(String className) {
         int dot = className.lastIndexOf('.');
         return dot >= 0 ? className.substring(dot + 1) : className;
-    }
-
-    private static String safeEntryId(String entryId) {
-        if (entryId == null || entryId.isEmpty()) {
-            return "unknown";
-        }
-        return entryId.length() > 96 ? entryId.substring(0, 96) : entryId;
     }
 
     private static void log(String message) {

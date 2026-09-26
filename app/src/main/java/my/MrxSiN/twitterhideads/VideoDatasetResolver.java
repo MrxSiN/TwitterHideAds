@@ -2,9 +2,7 @@ package my.MrxSiN.twitterhideads;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.content.pm.ApplicationInfo;
 
-import java.io.File;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -20,9 +18,6 @@ final class VideoDatasetResolver {
     private static final String PREFS = "twitterhideads_video_dataset_profile";
     private static final String CACHE_FORMAT = "1";
     private static final String URT_PREFIX = "com.x.urt.";
-    private static final int ACTIVE_THRESHOLD = 330;
-    private static final int MIN_MARGIN = 25;
-    private static final int MAX_CLASSES = 500;
 
     private VideoDatasetResolver() {
     }
@@ -35,11 +30,11 @@ final class VideoDatasetResolver {
         if (context == null || classLoader == null) {
             return Resolution.failure("missing-context-or-classloader", 0);
         }
-        String apkPath = sourceDir(context);
+        String apkPath = AdaptiveBoundaryCache.sourceDir(context);
         if (apkPath == null) {
             return Resolution.failure("missing-source-apk", 0);
         }
-        String fingerprint = fingerprint(apkPath, version);
+        String fingerprint = AdaptiveBoundaryCache.fingerprint(apkPath, version);
         Resolution cached = loadCached(context, classLoader, version, fingerprint);
         if (cached != null) {
             log("Video dataset cache hit: method=" + cached.method + ", score=" + cached.score);
@@ -53,7 +48,8 @@ final class VideoDatasetResolver {
         try {
             dexFile = new DexFile(apkPath);
             Enumeration<String> entries = dexFile.entries();
-            while (entries.hasMoreElements() && scanned < MAX_CLASSES) {
+            int maxClasses = PolicyLimits.videoClasses();
+            while (entries.hasMoreElements() && scanned < maxClasses) {
                 String className = entries.nextElement();
                 if (!isDirectUrtClass(className)) {
                     continue;
@@ -73,7 +69,7 @@ final class VideoDatasetResolver {
                 }
             }
         } catch (Throwable throwable) {
-            return Resolution.failure("scan-failed:" + describeThrowable(throwable), candidates.size());
+            return Resolution.failure("scan-failed:" + Reflect.describeThrowable(throwable), candidates.size());
         } finally {
             if (dexFile != null) {
                 try {
@@ -101,46 +97,61 @@ final class VideoDatasetResolver {
         return selected;
     }
 
+    /**
+     * Facts about {@code method} for OP_VIDEO_BOUNDARY; eligibility, score and
+     * threshold are decided by discovery.bf (docs/policy/discovery.md).
+     * Returns {@code null} for a non-candidate or a failed request.
+     */
     static Candidate evaluate(Method method, String source) {
-        int modifiers = method.getModifiers();
         Class<?>[] parameters = method.getParameterTypes();
+        if (parameters.length > 255) {
+            return null;
+        }
+        int modifiers = method.getModifiers();
         Class<?> returnType = method.getReturnType();
-        if (!Modifier.isStatic(modifiers)
-                || Modifier.isAbstract(modifiers)
-                || Modifier.isNative(modifiers)
-                || method.isSynthetic()
-                || method.isBridge()
-                || returnType == Void.TYPE
-                || returnType.isPrimitive()
-                || parameters.length < 4
-                || parameters.length > 8
-                || parameters[0] != returnType
-                || !isImmutableListLike(parameters[1])
-                || !isDirectUrtClass(method.getDeclaringClass().getName())
-                || !returnType.getName().startsWith(URT_PREFIX)) {
-            return null;
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_VIDEO_BOUNDARY);
+        try {
+            frame.bool(Modifier.isStatic(modifiers));
+            frame.bool(Modifier.isAbstract(modifiers));
+            frame.bool(Modifier.isNative(modifiers));
+            frame.bool(method.isSynthetic());
+            frame.bool(method.isBridge());
+            frame.bool(returnType == Void.TYPE);
+            frame.bool(returnType.isPrimitive());
+            frame.bool(parameters.length > 0 && parameters[0] == returnType);
+            frame.bool(parameters.length > 1 && isImmutableListLike(parameters[1]));
+            frame.bool(parameters.length > 1
+                    && parameters[1].getName().startsWith("kotlinx.collections.immutable."));
+            frame.bool(isDirectUrtClass(method.getDeclaringClass().getName()));
+            frame.bool(returnType.getName().startsWith(URT_PREFIX));
+            frame.bool(method.getName().length() <= 2);
+            frame.bool(Modifier.isPublic(modifiers));
+            frame.u8(parameters.length);
+            for (Class<?> parameter : parameters) {
+                frame.u8(parameter == Boolean.TYPE ? BfAbi.VR_BOOLEAN
+                        : parameter == Integer.TYPE ? BfAbi.VR_INT : BfAbi.VR_OTHER);
+            }
+            if (!frame.send(BfAbi.PROG_DISCOVERY, 4) || frame.out(0) != 1) {
+                return null;
+            }
+            return new Candidate(method, frame.out16(1), source, frame.out(3) == 1);
+        } finally {
+            frame.release();
         }
+    }
 
-        boolean hasBoolean = false;
-        boolean hasInt = false;
-        for (int index = 2; index < parameters.length; index++) {
-            hasBoolean |= parameters[index] == Boolean.TYPE;
-            hasInt |= parameters[index] == Integer.TYPE;
+    /** OP_VIDEO_SELECT over the two best scores (-1 when absent). */
+    static int selectDecision(int count, int best, int second) {
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_VIDEO_SELECT);
+        try {
+            frame.bool(count > 0);
+            frame.u16(Math.max(0, Math.min(best, 0xFFFF)));
+            frame.bool(second >= 0);
+            frame.u16(Math.max(0, Math.min(second, 0xFFFF)));
+            return frame.send(BfAbi.PROG_DISCOVERY, 1) ? frame.out(0) : BfAbi.VS_NONE;
+        } finally {
+            frame.release();
         }
-        if (!hasBoolean || !hasInt) {
-            return null;
-        }
-
-        int score = 0;
-        score += 110; // static direct-URT method
-        score += 100; // state copy: first parameter equals return type
-        score += parameters[1].getName().startsWith("kotlinx.collections.immutable.") ? 95 : 70;
-        score += hasBoolean ? 25 : 0;
-        score += hasInt ? 25 : 0;
-        score += parameters.length == 5 ? 30 : 10;
-        score += method.getName().length() <= 2 ? 10 : 0;
-        score += Modifier.isPublic(modifiers) ? 8 : 0;
-        return new Candidate(method, score, source);
     }
 
     private static Resolution select(List<Candidate> candidates) {
@@ -151,10 +162,11 @@ final class VideoDatasetResolver {
             @Override
             public int compare(Candidate left, Candidate right) {
                 int score = Integer.compare(right.score, left.score);
-                return score != 0 ? score : signature(left.method).compareTo(signature(right.method));
+                return score != 0 ? score : AdaptiveBoundaryCache.signature(left.method)
+                        .compareTo(AdaptiveBoundaryCache.signature(right.method));
             }
         });
-        int limit = Math.min(5, candidates.size());
+        int limit = Math.min(PolicyLimits.candidatesLogged(), candidates.size());
         for (int index = 0; index < limit; index++) {
             Candidate candidate = candidates.get(index);
             log("Video dataset candidate #" + (index + 1)
@@ -163,13 +175,16 @@ final class VideoDatasetResolver {
 
         Candidate best = candidates.get(0);
         int second = candidates.size() > 1 ? candidates.get(1).score : -1;
-        if (best.score < ACTIVE_THRESHOLD) {
-            return Resolution.failure("score-below-threshold:" + best.score, candidates.size());
+        switch (selectDecision(candidates.size(), best.score, second)) {
+            case BfAbi.VS_ACCEPT:
+                return Resolution.success(best.method, best.score, candidates.size(), best.source, false);
+            case BfAbi.VS_BELOW:
+                return Resolution.failure("score-below-threshold:" + best.score, candidates.size());
+            case BfAbi.VS_AMBIGUOUS:
+                return Resolution.failure("ambiguous:" + best.score + "/" + second, candidates.size());
+            default:
+                return Resolution.failure("policy-rejected", candidates.size());
         }
-        if (second >= 0 && best.score - second < MIN_MARGIN) {
-            return Resolution.failure("ambiguous:" + best.score + "/" + second, candidates.size());
-        }
-        return Resolution.success(best.method, best.score, candidates.size(), best.source, false);
     }
 
     private static boolean isImmutableListLike(Class<?> type) {
@@ -197,7 +212,7 @@ final class VideoDatasetResolver {
     ) {
         try {
             SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            String prefix = prefix(version);
+            String prefix = AdaptiveBoundaryCache.cachePrefix(version);
             if (!CACHE_FORMAT.equals(prefs.getString(prefix + "format", null))
                     || !fingerprint.equals(prefs.getString(prefix + "apk", null))) {
                 return null;
@@ -211,17 +226,17 @@ final class VideoDatasetResolver {
             }
             Class<?> type = Class.forName(className, false, classLoader);
             for (Method method : type.getDeclaredMethods()) {
-                if (!methodName.equals(method.getName()) || !params.equals(parameterKey(method))) {
+                if (!methodName.equals(method.getName()) || !params.equals(AdaptiveBoundaryCache.parameterKey(method))) {
                     continue;
                 }
                 Candidate verified = evaluate(method, "cache");
-                if (verified == null || verified.score < ACTIVE_THRESHOLD) {
+                if (verified == null || !verified.accepted) {
                     return null;
                 }
                 return Resolution.success(method, Math.max(score, verified.score), 1, "cache", true);
             }
         } catch (Throwable throwable) {
-            log("Video dataset cache ignored: " + describeThrowable(throwable));
+            log("Video dataset cache ignored: " + Reflect.describeThrowable(throwable));
         }
         return null;
     }
@@ -233,57 +248,18 @@ final class VideoDatasetResolver {
             Resolution resolution
     ) {
         try {
-            String prefix = prefix(version);
+            String prefix = AdaptiveBoundaryCache.cachePrefix(version);
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                     .putString(prefix + "format", CACHE_FORMAT)
                     .putString(prefix + "apk", fingerprint)
                     .putString(prefix + "class", resolution.method.getDeclaringClass().getName())
                     .putString(prefix + "method", resolution.method.getName())
-                    .putString(prefix + "params", parameterKey(resolution.method))
+                    .putString(prefix + "params", AdaptiveBoundaryCache.parameterKey(resolution.method))
                     .putInt(prefix + "score", resolution.score)
                     .apply();
         } catch (Throwable throwable) {
-            log("Video dataset cache save failed: " + describeThrowable(throwable));
+            log("Video dataset cache save failed: " + Reflect.describeThrowable(throwable));
         }
-    }
-
-    private static String sourceDir(Context context) {
-        try {
-            ApplicationInfo info = context.getApplicationInfo();
-            return info == null ? null : info.sourceDir;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private static String fingerprint(String apkPath, CompatibilityProfile.DetectedVersion version) {
-        File file = new File(apkPath);
-        return version.displayCode() + ":" + file.length() + ":" + file.lastModified();
-    }
-
-    private static String prefix(CompatibilityProfile.DetectedVersion version) {
-        return "v" + version.displayCode() + ".";
-    }
-
-    private static String parameterKey(Method method) {
-        StringBuilder builder = new StringBuilder();
-        for (Class<?> parameter : method.getParameterTypes()) {
-            if (builder.length() > 0) {
-                builder.append(',');
-            }
-            builder.append(parameter.getName());
-        }
-        return builder.toString();
-    }
-
-    private static String signature(Method method) {
-        return method.getDeclaringClass().getName() + "#" + method.getName()
-                + "(" + parameterKey(method) + ")";
-    }
-
-    private static String describeThrowable(Throwable throwable) {
-        String message = throwable.getMessage();
-        return throwable.getClass().getSimpleName() + (message == null ? "" : ": " + message);
     }
 
     private static void log(String message) {
@@ -322,11 +298,14 @@ final class VideoDatasetResolver {
         final Method method;
         final int score;
         final String source;
+        /** The policy's per-method threshold verdict. */
+        final boolean accepted;
 
-        Candidate(Method method, int score, String source) {
+        Candidate(Method method, int score, String source, boolean accepted) {
             this.method = method;
             this.score = score;
             this.source = source;
+            this.accepted = accepted;
         }
     }
 }

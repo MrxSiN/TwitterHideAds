@@ -18,7 +18,7 @@ import java.util.Set;
  */
 final class AdaptiveBoundaryCache {
     private static final String PREFS = "twitterhideads_adaptive_profile";
-    private static final String CACHE_FORMAT = "4";
+    private static final String CACHE_FORMAT = "5";
 
     private AdaptiveBoundaryCache() {
     }
@@ -48,13 +48,28 @@ final class AdaptiveBoundaryCache {
                 if (method == null) {
                     return null;
                 }
-                int score = RenderBoundaryShape.score(method);
-                if (score == RenderBoundaryShape.NOT_A_BOUNDARY
-                        || score < AdaptiveHookResolver.ACTIVE_THRESHOLD) {
+                if (!RenderBoundaryShape.accepts(method)) {
                     return null;
                 }
+                int score = RenderBoundaryShape.score(method);
                 topScore = Math.max(topScore, score);
                 methods.add(method);
+            }
+            // A caller that no longer resolves only loses its deoptimization.
+            ArrayList<Method> callers = new ArrayList<>();
+            Set<String> callerSignatures = prefs.getStringSet(
+                    prefix + "callers",
+                    Collections.<String>emptySet()
+            );
+            for (String cached : sorted(callerSignatures)) {
+                try {
+                    Method caller = resolveSignature(cached, classLoader);
+                    if (caller != null) {
+                        callers.add(caller);
+                    }
+                } catch (Throwable ignored) {
+                    // skip
+                }
             }
             return AdaptiveHookResolver.Resolution.success(
                     methods,
@@ -62,7 +77,7 @@ final class AdaptiveBoundaryCache {
                     methods.size(),
                     "cache",
                     true
-            );
+            ).withCallers(callers);
         } catch (Throwable throwable) {
             AdaptiveHookResolver.log(
                     "Adaptive cache ignored: " + Reflect.describeThrowable(throwable)
@@ -85,12 +100,17 @@ final class AdaptiveBoundaryCache {
             for (Method method : resolution.methods) {
                 signatures.add(signature(method));
             }
+            LinkedHashSet<String> callers = new LinkedHashSet<>();
+            for (Method caller : resolution.callers) {
+                callers.add(signature(caller));
+            }
             String prefix = cachePrefix(version);
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .edit()
                     .putString(prefix + "format", CACHE_FORMAT)
                     .putString(prefix + "apk", apkFingerprint)
                     .putStringSet(prefix + "boundaries", signatures)
+                    .putStringSet(prefix + "callers", callers)
                     .apply();
         } catch (Throwable throwable) {
             AdaptiveHookResolver.log(
@@ -99,7 +119,7 @@ final class AdaptiveBoundaryCache {
         }
     }
 
-    private static Method resolveSignature(String cached, ClassLoader classLoader)
+    static Method resolveSignature(String cached, ClassLoader classLoader)
             throws ClassNotFoundException {
         int hash = cached.indexOf('#');
         int open = cached.indexOf('(', hash + 1);
@@ -145,11 +165,11 @@ final class AdaptiveBoundaryCache {
                 + ":" + file.lastModified();
     }
 
-    private static String cachePrefix(CompatibilityProfile.DetectedVersion version) {
+    static String cachePrefix(CompatibilityProfile.DetectedVersion version) {
         return "v" + version.displayCode() + ".";
     }
 
-    private static String parameterKey(Method method) {
+    static String parameterKey(Method method) {
         StringBuilder value = new StringBuilder();
         for (Class<?> parameter : method.getParameterTypes()) {
             if (value.length() > 0) {

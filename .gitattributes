@@ -1,0 +1,7 @@
+# Generated files are compared byte for byte by tools/bftool/gen.py --check.
+brainfuck/generated/** text eol=lf
+app/src/main/cpp/generated/** text eol=lf
+app/src/main/java/my/MrxSiN/twitterhideads/BfAbi.java text eol=lf
+brainfuck/src/*.bf text eol=lf
+brainfuck/constants.txt text eol=lf
+brainfuck/programs.json text eol=lf

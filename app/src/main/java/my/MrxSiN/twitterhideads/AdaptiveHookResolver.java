@@ -18,7 +18,8 @@ import java.util.Set;
  * discovery in {@link BoundaryCandidateSource} and persistence in
  * {@link AdaptiveBoundaryCache}; this class owns ranking and reporting.
  *
- * Every boundary at or above {@link #ACTIVE_THRESHOLD} is returned rather than
+ * Every boundary the policy accepts (discovery.bf, score threshold 320) is
+ * returned, up to the policy's boundary limit, rather than
  * a single winner. X compiles one composable into both a defaulted and a
  * non-defaulted entry point, and renders posts through more than one boundary,
  * so demanding a unique winner made near-ties resolve to no hook at all.
@@ -26,10 +27,6 @@ import java.util.Set;
  * is redundant rather than harmful.
  */
 final class AdaptiveHookResolver {
-    static final int ACTIVE_THRESHOLD = 320;
-
-    private static final int MAX_BOUNDARIES = 16;
-
     private AdaptiveHookResolver() {
     }
 
@@ -56,6 +53,7 @@ final class AdaptiveHookResolver {
         );
         if (cached != null) {
             log("Adaptive cache hit: boundaries=" + cached.methods.size()
+                    + ", inlinedCallers=" + cached.callers.size()
                     + ", score=" + cached.score
                     + ", primary=" + cached.method());
             return cached;
@@ -85,6 +83,11 @@ final class AdaptiveHookResolver {
         }
 
         Resolution selected = select(candidates, dexKitStatus, fallbackStatus);
+        if (selected.method() != null && "ok".equals(dexKitStatus)) {
+            selected = selected.withCallers(
+                    InlinedCallerSource.find(apkPath, classLoader, selected.methods)
+            );
+        }
         long elapsed = System.currentTimeMillis() - started;
         if (selected.method() != null) {
             AdaptiveBoundaryCache.save(context, version, apkFingerprint, selected);
@@ -92,6 +95,7 @@ final class AdaptiveHookResolver {
             log("Adaptive resolver selected: boundaries=" + selected.methods.size()
                     + ", topScore=" + selected.score
                     + ", candidates=" + selected.candidateCount
+                    + ", inlinedCallers=" + selected.callers.size()
                     + ", source=" + selected.source
                     + ", elapsedMs=" + elapsed);
         } else {
@@ -104,7 +108,7 @@ final class AdaptiveHookResolver {
         return selected;
     }
 
-    private static Resolution select(
+    static Resolution select(
             List<Candidate> rawCandidates,
             String dexKitStatus,
             String fallbackStatus
@@ -135,7 +139,7 @@ final class AdaptiveHookResolver {
             }
         });
 
-        int limit = Math.min(MAX_BOUNDARIES, candidates.size());
+        int limit = Math.min(PolicyLimits.maxBoundaries(), candidates.size());
         ArrayList<Method> methods = new ArrayList<>(limit);
         for (int index = 0; index < limit; index++) {
             methods.add(candidates.get(index).method);
@@ -164,6 +168,8 @@ final class AdaptiveHookResolver {
 
     static final class Resolution {
         final List<Method> methods;
+        /** Direct callers of {@link #methods}, deoptimized so AOT-inlined copies reach the hooks. */
+        final List<Method> callers;
         final int score;
         final int candidateCount;
         final String source;
@@ -172,6 +178,7 @@ final class AdaptiveHookResolver {
 
         private Resolution(
                 List<Method> methods,
+                List<Method> callers,
                 int score,
                 int candidateCount,
                 String source,
@@ -179,6 +186,7 @@ final class AdaptiveHookResolver {
                 String reason
         ) {
             this.methods = methods;
+            this.callers = callers;
             this.score = score;
             this.candidateCount = candidateCount;
             this.source = source;
@@ -191,6 +199,18 @@ final class AdaptiveHookResolver {
             return methods.isEmpty() ? null : methods.get(0);
         }
 
+        Resolution withCallers(List<Method> resolvedCallers) {
+            return new Resolution(
+                    methods,
+                    resolvedCallers,
+                    score,
+                    candidateCount,
+                    source,
+                    cacheHit,
+                    reason
+            );
+        }
+
         static Resolution success(
                 List<Method> methods,
                 int score,
@@ -200,6 +220,7 @@ final class AdaptiveHookResolver {
         ) {
             return new Resolution(
                     methods,
+                    Collections.<Method>emptyList(),
                     score,
                     candidateCount,
                     source,
@@ -214,6 +235,7 @@ final class AdaptiveHookResolver {
 
         static Resolution failure(String reason, int candidateCount) {
             return new Resolution(
+                    Collections.<Method>emptyList(),
                     Collections.<Method>emptyList(),
                     -1,
                     candidateCount,

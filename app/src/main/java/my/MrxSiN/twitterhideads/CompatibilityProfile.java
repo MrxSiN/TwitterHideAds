@@ -4,13 +4,16 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 
-/** Exact render-hook mappings retained as a zero-scan fast path. */
+/**
+ * Exact render-hook mappings retained as a zero-scan fast path. Which
+ * profile applies to a version is decided by discovery.bf; the class and
+ * method names stay here because they are Java-side hook targets.
+ */
 final class CompatibilityProfile {
     static final String TARGET_PACKAGE = "com.twitter.android";
 
     private static final Profile X_12_7_1 = new Profile(
             "x-12.7.1",
-            "12.7.1",
             "com.x.urt.items.post.a6",
             "com.x.urt.items.post.a6$a",
             "com.x.urt.items.post.c7",
@@ -23,7 +26,6 @@ final class CompatibilityProfile {
 
     private static final Profile X_12_8_0 = new Profile(
             "x-12.8.0",
-            "12.8.0",
             "com.x.urt.items.post.w5",
             "com.x.urt.items.post.w5$a",
             "com.x.urt.items.post.d7",
@@ -57,34 +59,36 @@ final class CompatibilityProfile {
     }
 
     /**
-     * X 12.9.1 is intentionally excluded. The adaptive resolver rediscovers its
-     * renamed boundary without using s6.e.
+     * The version table and its prefix rule (trimmed name equal to the
+     * version, or followed by '-', '.', '+' or ' ') are in discovery.bf
+     * (OP_PROFILE). X 12.9.1 is intentionally absent: the adaptive resolver
+     * rediscovers its renamed boundary without using s6.e.
      */
     static Profile selectExact(DetectedVersion version) {
         if (version == null || version.versionName == null) {
             return null;
         }
-        if (matchesPrefix(version.versionName, X_12_8_0.versionPrefix)) {
-            return X_12_8_0;
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_PROFILE);
+        try {
+            frame.versionText(version.versionName);
+            if (!frame.send(BfAbi.PROG_DISCOVERY, 1)) {
+                return null;
+            }
+            switch (frame.out(0)) {
+                case BfAbi.PROFILE_X_12_8_0:
+                    return X_12_8_0;
+                case BfAbi.PROFILE_X_12_7_1:
+                    return X_12_7_1;
+                default:
+                    return null;
+            }
+        } finally {
+            frame.release();
         }
-        if (matchesPrefix(version.versionName, X_12_7_1.versionPrefix)) {
-            return X_12_7_1;
-        }
-        return null;
-    }
-
-    private static boolean matchesPrefix(String rawName, String prefix) {
-        String name = rawName.trim();
-        return name.equals(prefix)
-                || name.startsWith(prefix + "-")
-                || name.startsWith(prefix + ".")
-                || name.startsWith(prefix + "+")
-                || name.startsWith(prefix + " ");
     }
 
     static final class Profile {
         final String id;
-        final String versionPrefix;
         final String postInterface;
         final String expectedRenderModel;
         final String primaryClass;
@@ -96,7 +100,6 @@ final class CompatibilityProfile {
 
         Profile(
                 String id,
-                String versionPrefix,
                 String postInterface,
                 String expectedRenderModel,
                 String primaryClass,
@@ -107,7 +110,6 @@ final class CompatibilityProfile {
                 String tertiaryMethod
         ) {
             this.id = id;
-            this.versionPrefix = versionPrefix;
             this.postInterface = postInterface;
             this.expectedRenderModel = expectedRenderModel;
             this.primaryClass = primaryClass;

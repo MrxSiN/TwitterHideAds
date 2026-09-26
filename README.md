@@ -1,148 +1,311 @@
 <div align="center">
 
-# <img src="branding/twitter-hide-ads-icon.png" width="36" height="36"> Twitter Hide Ads
+<img src="docs/icon.svg" width="120" alt="Twitter Hide Ads">
 
-### A focused Xposed module for removing promoted posts from the X Android app
+# Twitter Hide Ads
 
-[![Android](https://img.shields.io/badge/Android-Vector-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/JingMatrix/Vector)
-[![API](https://img.shields.io/badge/libxposed%20API-102-brightgreen?style=for-the-badge)](https://github.com/libxposed/api)
-[![Target](https://img.shields.io/badge/Target-X-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/)
-[![DexKit](https://img.shields.io/badge/Powered%20by-DexKit-6A5ACD?style=for-the-badge)](https://github.com/LuckyPray/DexKit)
-[![JDK](https://img.shields.io/badge/JDK-17%2B-ED8B00?style=for-the-badge&logo=openjdk&logoColor=white)](https://openjdk.org/)
+**An Xposed module that removes promoted posts from X, with its ad policy written in Brainfuck. Yes, really.**
+
+Promoted posts are stopped before X draws them, not hidden after.
+
+<br>
+
+[![Release](https://img.shields.io/github/v/release/MrxSiN/TwitterHideAds?include_prereleases&color=1D9BF0&label=release&style=for-the-badge)](https://github.com/MrxSiN/TwitterHideAds/releases)
+[![Downloads](https://img.shields.io/github/downloads/MrxSiN/TwitterHideAds/total?color=3DDC84&logo=android&logoColor=fff&style=for-the-badge)](https://github.com/MrxSiN/TwitterHideAds/releases)
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=fff&style=for-the-badge)](#requirements)
+[![libxposed](https://img.shields.io/badge/libxposed-API%20102-E8A33D?style=for-the-badge)](https://github.com/libxposed/api)
 
 </div>
 
-<p align="center"><img src="branding/twitter-hide-ads-icon.png" width="160" alt="Twitter Hide Ads app icon"></p>
+---
 
-## ✨ Features
+> [!NOTE]
+> X renames its obfuscated classes with almost every update. The module finds its targets again by
+> shape, caches them per X version and APK, and rescans after an update. When it cannot be sure it
+> installs nothing rather than guess. See the [compatibility](#compatibility) table for what has
+> actually been tested.
 
-- Suppresses promoted posts wherever X renders them: Home timeline, post detail, search and every other surface sharing the post render boundaries.
-- Filters promoted videos out of the full-screen Video Tab before pager creation.
-- Waits for `Application.attach()` so X's final app class loader is ready before discovery.
-- Uses DexKit to locate obfuscated render boundaries across app updates.
-- Identifies boundaries by the post model they render, not by the package they are declared in.
-- Deoptimizes resolved boundaries so ART cannot serve a compiled copy past the hook.
-- Caches resolved boundaries by X version and APK fingerprint, and rescans after an X update.
-- Fails open on unresolved boundaries so the timeline is never left blank.
-- Limits its scope to the official X Android package.
+## Why Brainfuck?
 
-## 🎯 Scope
+Surely nobody would write the decision logic of an ad blocker in Brainfuck.
 
-The module hooks only:
+Brainfuck was selected for its rich ecosystem, mature package manager, excellent Android SDK
+bindings, comprehensive type system, first-class coroutine support, and famously pleasant
+debugging experience.
+
+Just joking.
+
+The real idea is the one [ThreadsHideAds](https://github.com/MrxSiN/ThreadsHideAds) proved out:
+**keep every decision about X out of the Android code.** Whether an entry identifier is promoted,
+how entry, metadata and fallback evidence rank, which Video Tab entries may go and when a rebuilt
+batch is safe, how a Compose render boundary is recognised and scored — that is the part that has
+to change when X changes, and it is the part that tends to leak into hook callbacks and reflection
+helpers until nobody can say where the policy lives.
+
+Brainfuck enforces that boundary, because it literally cannot call Android, Xposed, DexKit or JNI.
+It reads bytes and writes bytes. Java reduces what it read to a handful of flags, roles and
+character codes, sends them in one request, and does exactly what the answer says.
+TwitterHideAds uses Brainfuck for its filtering and decision-policy core, while Android/Xposed
+integration remains Java/native.
+
+It is not slow either. The three programs are hand-written plain eight-command Brainfuck, compiled
+ahead of time to C and then to native code with the NDK. There is no interpreter in the APK, and a
+post is classified in about 2 µs on a Pixel 8 Pro — several times faster than the Java it replaced.
+
+|  | |
+|---|---|
+| 🧹 **Stopped before render** | Promoted posts are declined at the Compose render boundary, so there is no blank gap and no flash of an ad. |
+| 🌐 **Every surface** | Home, post detail, search and anything else that renders posts through the same boundaries; the Video Tab is filtered at its data layer. |
+| 🔎 **Survives renames** | DexKit finds the render boundaries by structure, cached per X version and APK fingerprint; an X update triggers a rescan. |
+| 🧠 **Policy in Brainfuck, compiled** | Every decision is hand-written Brainfuck, compiled ahead of time to native code. One native call per post, no allocations. |
+| 🛟 **Fails open** | Anything the module cannot classify is left alone. A failed policy request keeps the post. |
+| 🧪 **Proven identical** | The old Java policy is kept as a test oracle; 411 162 comparisons per run check that old and new answers match. |
+
+---
+
+## What it removes
+
+A promoted post is recognised by its **URT entry identifier**, matched whole against a strict
+grammar, or by a promoted-metadata model among its fields:
 
 ```text
-com.twitter.android
+Home         promoted-tweet-<id>-<hash>
+Post detail  conversationthread-<id>-promoted-tweet-<id>-<hash>
+Search       search-conversation-<id>-promoted-tweet-<id>-<hash>
+Video Tab    promoted-tweet-<id>
 ```
 
-Do not enable additional applications in the module scope.
+Look-alikes such as `not-promoted-x`, `unpromoted-1`, `promoted-deal` or free text that mentions
+"promoted" never count. A model with no recognisable identifier falls back to a bounded walk for the
+promoted post actions (`PromotedDismissAd`, `PromotedAdsInfo`, `PromotedReportAd`). Organic posts,
+replies and cursor, paging and control entries are never touched.
 
-## 🔍 How it works
+<details open>
+<summary><b>🧱 The two layers</b></summary>
+<br>
 
-X ships a fully obfuscated, Compose-rendered timeline, and the names of the classes and methods involved change with almost every release. The module therefore resolves its hooks structurally at runtime:
+| Layer | Where | What it does |
+|---|---|---|
+| **Render boundaries** | the static Compose functions that draw a post, found by DexKit (9 on X 12.28.0) | Classifies the post model before the call; a promoted post returns without `chain.proceed()`. Each boundary is deoptimized so ART cannot run an inlined copy past the hook, and each must prove at runtime that it renders timeline entries or it is unhooked. |
+| **Video Tab dataset** | the URT state-copy method that receives the tab's paging batch, found by structure | Rebuilds the Kotlin persistent list without promoted videos through the list's own builder, before the pager is created. Anything it cannot rebuild exactly is left alone. |
 
-1. The module entry class extends `io.github.libxposed.api.XposedModule` and installs a lightweight `Application.attach()` guard from `onPackageReady()` instead of running discovery immediately.
-2. Once X supplies its real application context and final class loader, an exact compatibility profile is selected when the installed X version is one of the validated builds.
-3. When no exact profile matches, adaptive structural resolution runs instead. DexKit enumerates the application's static `void` methods and the results are pre-filtered on the raw descriptor so that only methods taking a post model first are loaded through the host class loader.
-4. Each surviving method is scored by role rather than by parameter position: a `Composer` followed by the compiler-generated `$changed` mask and optional `$default` mask, a post model in first position, and any `Modifier`, layout-scope or post-dependency parameters found in between.
-5. Every boundary scoring at or above the activation threshold is hooked. The Kotlin Compose compiler emits both a defaulted and a non-defaulted entry point for one composable, so requiring a single unique winner used to resolve to no hook at all.
-6. Each resolved boundary is deoptimized through `XposedInterface.deoptimize`. ART inlines these small composables into their callers, and without deoptimization the caller keeps running the compiled copy and the hook is never reached.
-7. At render time the post model is classified from its direct fields: an entry identifier carrying the `promoted-` token, or a promoted-metadata field. A bounded action-graph walk is used as a fallback where the metadata class itself has been obfuscated away.
-8. A promoted post is suppressed before Compose renders it. Normal posts are passed through untouched.
+</details>
 
-   Only the Home timeline names a promoted entry `promoted-tweet-<id>-<hash>`. Every surface that nests a post inside a module prefixes that module's own entry, so the same advertisement arrives as `conversationthread-<id>-promoted-tweet-<id>-<hash>` in a post detail and as `search-conversation-<id>-promoted-tweet-<id>-<hash>` in search. The token is therefore matched at any `-` segment boundary, which is what makes suppression app-wide rather than Home-only.
-9. The Video Tab is handled separately at the data layer. The resolver identifies the URT state-copy method receiving the tab's mixed Kotlin immutable list and rebuilds a compatible immutable copy with promoted entries removed, preserving cursor and paging-control entries.
+---
 
-The runtime log for this revision identifies the active Home timeline boundary as:
+## Status
+
+**v3.0.0.** The filtering and decision policy moved from Java into three hand-written Brainfuck
+programs, compiled ahead of time. The 2.1.0 Java policy was frozen as an oracle first, and the new
+programs answer identically over hundreds of thousands of randomized and exhaustive cases on the JVM
+and on an arm64 phone ([`docs/BRAINFUCK_ARCHITECTURE.md`](docs/BRAINFUCK_ARCHITECTURE.md)).
+
+The release version is `3.0.0` (`versionCode 34`).
+
+### Compatibility
+
+Each row is one setup somebody has actually run. If you try another, please open a pull request
+adding a row.
+
+| Device | Android | Framework | X | Module | Result | Tester | Date |
+|---|---|---|---|---|---|---|---|
+| Pixel 8 Pro | 17 | Vector 2.2 (API 102) | 12.28.0-prod.01 | 3.0.0 | 9 boundaries, 45+ promoted posts blocked on Home and post detail, 2–4 promoted videos removed per Video Tab batch, paging intact | @MrxSiN | 2026-09 |
+| Pixel 8 Pro | 17 | Vector 2.2 (API 102) | 12.23.1-prod.01 | 2.1.0 | 11 boundaries, promoted posts blocked on Home and post detail | @MrxSiN | 2026-09 |
+
+### Known limits
+
+- **Search**: no promoted search entry was served during the 3.0.0 test session. Search uses the
+  same render boundaries and the same identifier grammar, and the tests cover it, but it has not
+  been observed on a device for 3.0.0.
+- **LSPatch** needs a build that loads libxposed API 102 modules; 3.0.0 has not been tried under it.
+- 32-bit and x86 devices ship the native library but have not been run.
+- A batch with more than 255 items or a model with more than 255 text fields is left alone.
+
+## Requirements
+
+| | |
+|---|---|
+| **Android** | 8.0 (API 26) or newer |
+| **App** | X (`com.twitter.android`) |
+| **Framework** | [Vector](https://github.com/JingMatrix/Vector) or another libxposed API 101+ framework, or [LSPatch](https://github.com/JingMatrix/LSPatch) (see [Known limits](#known-limits)) |
+| **Root** | Required by Vector; the module itself asks for none |
+
+Built against the modern [libxposed API](https://github.com/libxposed/api)
+(`io.github.libxposed:api`), not the legacy `de.robv.android.xposed` bridge.
+
+## Install
+
+```
+1. Install the APK from Releases
+2. Enable Twitter Hide Ads in Vector
+3. Force-stop X once, then open it
+```
+
+The module declares a **static scope** — X only — so there is nothing to pick.
+
+The framework log shows what happened, in lines beginning with `TwitterHideAds:`:
 
 ```text
-com.x.jetfuel.v2.element.attribute.h.h(com.x.urt.items.post.g5, Modifier, ..., Composer, int)
+Detected X version=12.28.0-prod.01, ..., policyCore=brainfuck-aot abi=1.0
+Initialization complete: resolver=adaptive, boundaries=9, installedHooks=9, enforcement=ACTIVE_ADAPTIVE, ...
+Blocked promoted post before Compose: boundary=adaptive-a.h, entryId=promoted-tweet-<n>-<n>, ...
+Filtered promoted videos before pager creation: originalSize=24, filteredSize=22, removed=2, ...
 ```
 
-This boundary is declared outside the post package. Resolution keyed on the declaring package missed it entirely, which is why boundary identity is now derived from the post model instead.
+Release builds redact entry identifiers to their shape, so an exported log carries no post ids.
 
-## ✅ Requirements
+<details>
+<summary><b>Without root: LSPatch</b></summary>
+<br>
 
-### Runtime
+The module has no root-only calls, so LSPatch can embed it into X:
 
-- A framework implementing the modern Xposed API, version 101 or newer. The legacy `de.robv.android.xposed` API is no longer used, so frameworks that only implement it cannot load this module. Two supported options:
-  - **Rooted:** [Vector](https://github.com/JingMatrix/Vector) on Android 8.1 or newer, with Magisk or KernelSU and Zygisk enabled.
-  - **Rootless:** [LSPatch](https://github.com/JingMatrix/LSPatch), which embeds Vector into a patched X APK and loads modern libxposed modules through the same runtime. Use the `JingMatrix` fork; the archived `LSPosed/LSPatch` build predates the modern API and cannot load this module.
-- The official X application (`com.twitter.android`).
-- The **Twitter Hide Ads** APK installed and enabled in the framework manager, or baked into the patched APK in LSPatch integrated mode.
+1. Install the LSPatch manager ([JingMatrix fork](https://github.com/JingMatrix/LSPatch); the
+   archived `LSPosed/LSPatch` predates the modern API).
+2. Patch X with **Twitter Hide Ads** as an embedded module, base APK together with all splits.
+3. Uninstall the store copy of X, then install the patched APKs as a set.
 
-### Build environment
+</details>
 
-- Android Studio with JDK 17 or newer, **or** a standalone JDK 17+ setup.
-- Gradle 9.6.1 when building without an existing wrapper.
-- Android SDK Platform 36.
-- Git or a downloaded copy of the project source.
+---
 
-## 🛠️ Build
+## How it works
 
-From the project directory, build the release APK with the included wrapper:
+```
+X / Android
+  → libxposed hook (Application.attach guard, render boundaries, Video Tab dataset hook)
+  → Java host / DexKit (discovery, reflection, caches, witness, deoptimization)
+  → normalized primitive facts: flags, parameter roles, one small code per character
+  → JNI (one call)
+  → AOT-compiled Brainfuck policy (libtwitterbf.so)
+  → KEEP / BLOCK / UNKNOWN (and scores, item classes, limits)
+  → Java host performs the actual object/list operation
+```
 
-#### Linux / macOS
+One rule decides where code goes: **if it needs Android, Java, Xposed, DexKit or JNI, Java does
+it; if it decides what to do with what Java read, Brainfuck decides.**
+
+<details>
+<summary><b>Starting at the right moment</b></summary>
+<br>
+
+- Loading into X installs only a small `Application.attach()` guard. Discovery waits until X has its
+  real application context and final class loader.
+- A validated X version uses an exact profile (which versions qualify is decided by `discovery.bf`).
+  Otherwise DexKit lists the app's static `void` methods, keeps those taking a post model first, and
+  `discovery.bf` scores each by role: a `Composer`, the compiler's `$changed`/`$default` masks, and
+  any `Modifier`, layout-scope or post-dependency parameters. Every boundary scoring 320 or more is
+  hooked, up to 16.
+- Results are cached by X version and APK fingerprint; an X update forces a rescan. When DexKit
+  cannot load, a bounded `DexFile` scan of `com.x.urt`, `com.x.jetfuel` and `com.x.mappers` runs
+  instead.
+- Boundaries are deoptimized, with their direct callers, and each adaptive boundary is witnessed:
+  12 calls without a post-like model and it is unhooked.
+
+</details>
+
+<details>
+<summary><b>The Brainfuck core</b></summary>
+<br>
+
+| Program | Decides |
+|---|---|
+| `post` | the entry-identifier grammar (segment boundaries, nested module prefixes, the 256-char limit), the "mentions promoted" ambiguity rule, verdict precedence, Video Tab item classes, the safe-mixed-batch rule and the copy/verification checks |
+| `action` | whether a scalar found by the fallback walk names a promoted post action |
+| `discovery` | render and Video Tab boundary eligibility, scores and thresholds, the exact-profile version table, discovery and traversal limits |
+
+Each program is a `.bf` file in `brainfuck/src/` with a normative specification in
+[`docs/policy/`](docs/policy/). Comments may not contain a command character, `%cell` comments name
+tape cells, `@cell` checkpoints assert where the data pointer is, and `~N` asserts the length of a
+run; `tools/bftool/lint.py` checks all of them. The optimizer turns the programs into C (clear and
+transfer loops, value propagation, equality tests become `switch`), every loop charges an execution
+budget, and the NDK builds `libtwitterbf.so`. The tape lives on the caller's stack, so concurrent
+renders share nothing. Frame format, opcodes and memory semantics are in
+[`docs/BRAINFUCK_ARCHITECTURE.md`](docs/BRAINFUCK_ARCHITECTURE.md).
+
+</details>
+
+<details>
+<summary><b>Staying fast</b></summary>
+<br>
+
+DexKit and broad reflection run only during initialization. Per render the hook reads the model's
+text fields, maps each character to a code with one table lookup, and makes one `@FastNative` call.
+On a Pixel 8 Pro (release build):
+
+| Case | Java 2.1.0 | Brainfuck 3.0.0 |
+|---|---|---|
+| organic post | 14.9 µs | 2.4 µs |
+| promoted post | 6.1 µs | 1.1 µs |
+| post-detail promoted reply | 8.3 µs | 1.3 µs |
+| Video Tab batch, 20 items | 275 µs | 6.8 µs |
+
+The hot path allocates nothing. Method and full percentiles are in
+[`docs/BRAINFUCK_ARCHITECTURE.md`](docs/BRAINFUCK_ARCHITECTURE.md#performance).
+
+</details>
+
+---
+
+## Build
 
 ```bash
+python tools/bftool/gen.py                      # check brainfuck/src, regenerate C, ABI and memory map
+python -m unittest discover -s tests/compiler   # optimizer, AOT and randomized program tests
+./gradlew :app:testDebugUnitTest                # JVM parity against the frozen 2.1.0 policy
 ./gradlew :app:assembleRelease
 ```
 
-#### Windows PowerShell
+The generated files are committed; the Gradle build checks them with `checkBrainfuck` and never
+edits them, so building the APK needs no Python. `scripts/check-project.sh` runs the static project
+checks.
 
-```powershell
-.\gradlew.bat :app:assembleRelease
+You need JDK 17+, Android SDK 36 with NDK 28.2.13676358 and CMake 3.22.1, Python 3.10+, and for the
+JVM tests a host C compiler (MSVC Build Tools on Windows, gcc or clang elsewhere).
+
+CI checks the generated files, runs the Python and JVM tests and builds the APK with a check of every
+native library on every push and pull request. A `v*` tag signs the release APK in a separate job,
+the only one that sees the signing secrets, and attaches it to the GitHub Release.
+
+## Design
+
+```
+brainfuck/src/      the three hand-written programs: every decision, word and limit
+brainfuck/          programs.json, constants.txt (ABI numbers), generated memory map
+docs/policy/        the normative specification of each program
+tools/bftool/       source checker, optimizer, C emitter, reference interpreter (tests only)
+app/src/main/cpp/   runtime, JNI glue and the generated C
+PolicyFrame         per-thread request encoding, response validation
+ModuleMain          libxposed entry and bootstrap
+TwitterAdBlocker    render-boundary hooks, witness, deoptimization
+*Resolver, *Source  DexKit and DexFile discovery, caches
+VideoDataset*       the Video Tab dataset hook and persistent-list rebuilding
 ```
 
-The generated APK will be located under:
+The layering, ABI, parity method and measurements are in
+[`docs/BRAINFUCK_ARCHITECTURE.md`](docs/BRAINFUCK_ARCHITECTURE.md); X-specific findings are in
+[`HOOK_NOTES.md`](HOOK_NOTES.md).
 
-```text
-app/build/outputs/apk/release/
-```
+## Troubleshooting
 
-Native libraries are packaged uncompressed. The framework loads a module's native code directly from inside the APK, and a compressed `libdexkit.so` cannot be loaded from that path.
+| Problem | Try |
+|---|---|
+| Promoted posts still appear | Check the log for `enforcement=ACTIVE_ADAPTIVE`. `FAIL_OPEN_NO_BOUNDARY` means no boundary was resolved. |
+| `Brainfuck policy core unavailable` | `libtwitterbf.so` could not load for the device ABI. Reinstall the module APK. |
+| `Brainfuck policy request failed open` | A request was malformed or too large and the content was kept. Report the logged `op` and `kind`. |
+| Hooks install but nothing is blocked | Check `deoptimized=` in the initialization line; `0` with `deoptimizeSupported=false` means the framework interface never attached. |
+| `couldn't find "libdexkit.so"` | The APK was built with compressed native libraries. Keep `useLegacyPackaging = false`. |
+| Broken after an X update | X may have changed its render boundaries. Report the `TwitterHideAds:` log lines (`DexKit structural query`, `Adaptive boundary`) with the X version. |
 
-## 📦 Installation
-
-1. Build and install the release APK.
-2. Open the framework manager. With LSPatch, patch X in manager mode and select the module there, or patch it in integrated mode with the module embedded.
-3. Enable **Twitter Hide Ads**.
-4. The module declares a static scope of `com.twitter.android` in `META-INF/xposed/scope.list`, so no scope selection is required.
-5. Force-stop X once after installing or updating the module, then reopen it.
-6. Review the framework logs for entries beginning with:
-
-```text
-[TwitterHideAds]
-```
-
-## 🧪 Validation status
-
-The release version is `2.1.0` (`versionCode 32`). Suppression was validated on device against X `12.23.1-prod.01` under Vector 2.2: the adaptive resolver installed 11 deoptimized boundaries with `enforcement=ACTIVE_ADAPTIVE`, and promoted entries were blocked before render both on the Home timeline and inside post detail, where entry identifiers such as `conversationthread-<id>-promoted-tweet-<id>-<hash>` had previously been let through. Normal posts, replies and search results continued to render. Video Tab dataset filtering is unchanged from `1.2.0` and remains scoped to callers under `com.x.video.tab`.
-
-The included GitHub Actions workflow builds on every push, pull request, and manual run. A `v*` tag additionally builds, signs, and attaches the release APK to the GitHub Release when the four signing secrets are configured.
-
-## 🩺 Troubleshooting
-
-| Problem | Suggested action |
-| --- | --- |
-| Promoted posts still appear | Confirm the module is enabled and check whether the log reports `enforcement=ACTIVE_ADAPTIVE`. `FAIL_OPEN_NO_BOUNDARY` means no boundary was resolved. |
-| `couldn't find "libdexkit.so"` | The APK was built with compressed native libraries. Rebuild with `useLegacyPackaging = false`, which is the configured default. |
-| Hooks install but nothing is blocked | Check `deoptimized=` in the initialization line. A value of `0` alongside `deoptimizeSupported=false` means the framework interface was never attached to the module entry. |
-| `no-structural-candidate` after an update | X changed its render boundary shape. Capture the `DexKit structural query` and `Adaptive boundary` log lines for analysis. |
-| Stale boundary after an X update | Resolution is cached by X version and APK fingerprint and should rescan automatically. Force-stop X once to trigger a fresh resolution. |
-
-## 🙏 Credits
-
-This project depends on and benefits from the following open-source work:
+## Credits
 
 | Project | Contribution |
-| --- | --- |
-| [DexKit](https://github.com/LuckyPray/DexKit) by LuckyPray | High-performance runtime DEX parsing and discovery of obfuscated classes and methods. Licensed under Apache-2.0. |
-| [Vector](https://github.com/JingMatrix/Vector) by JingMatrix | Provides the ART hooking framework, and the method deoptimization used to reach inlined composables. Licensed under GPL-3.0. |
-| [LSPatch](https://github.com/JingMatrix/LSPatch) by JingMatrix | Embeds Vector into a patched APK, which is how this module runs without root. Licensed under GPL-3.0. |
-| [libxposed API](https://github.com/libxposed/api) | The modern Xposed module API this module compiles against. Licensed under Apache-2.0. |
+|---|---|
+| [DexKit](https://github.com/LuckyPray/DexKit) by LuckyPray | Runtime DEX parsing and discovery of obfuscated classes and methods (Apache-2.0). |
+| [libxposed API](https://github.com/libxposed/api), [Vector](https://github.com/JingMatrix/Vector), [LSPatch](https://github.com/JingMatrix/LSPatch) | The hooking API, framework and deoptimization the module runs on, and rootless embedding. |
+| [ThreadsHideAds](https://github.com/MrxSiN/ThreadsHideAds) | The Brainfuck toolchain (source checker, optimizer, AOT C emitter, reference interpreter) and conventions, adapted from `v2.0.0`. |
 
-## ⚠️ Disclaimer
+## Disclaimer
 
-This project is not affiliated with, endorsed by, or sponsored by X Corp. or
-Twitter. It is provided for educational and personal use. App updates may break
-the hooks without notice.
+Not affiliated with, endorsed by or sponsored by X Corp. or Twitter. Provided for educational and
+personal use. X updates may break the hooks without notice.

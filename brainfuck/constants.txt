@@ -1,0 +1,158 @@
+# Single source of truth for the Brainfuck policy ABI
+# (docs/BRAINFUCK_ARCHITECTURE.md). tools/bftool/gen.py exports every constant
+# below into app/src/main/java/my/MrxSiN/twitterhideads/BfAbi.java and
+# app/src/main/cpp/generated/bf_abi.h. Values are stable: never renumber, only
+# append. A change to a request or response layout bumps ABI_MAJOR.
+
+const ABI_MAJOR = 1
+const ABI_MINOR = 0
+const HEADER_SIZE = 8
+const RESPONSE_BIT = 0x80
+
+# Program ids (brainfuck/programs.json order).
+const PROG_POST = 0
+const PROG_ACTION = 1
+const PROG_DISCOVERY = 2
+
+# Response status (header byte 3 of a response).
+const ST_OK = 0
+const ST_BAD_VERSION = 1
+const ST_BAD_OPCODE = 2
+
+# ---- post.bf
+const OP_CLASSIFY_POST = 0x10
+const OP_VIDEO_BATCH = 0x11
+const OP_VIDEO_DECIDE = 0x12
+
+# ---- action.bf
+const OP_ACTION_NAMES = 0x20
+
+# ---- discovery.bf
+const OP_RENDER_BOUNDARY = 0x30
+const OP_EXACT_BOUNDARY = 0x31
+const OP_VIDEO_BOUNDARY = 0x32
+const OP_VIDEO_SELECT = 0x33
+const OP_PROFILE = 0x34
+const OP_LIMITS = 0x35
+
+# Timeline verdicts (OP_CLASSIFY_POST).
+const V_UNKNOWN = 0
+const V_ORGANIC = 1
+const V_PROMOTED = 2
+const V_NEED_FALLBACK = 3
+
+# Signal bits (OP_CLASSIFY_POST).
+const SIG_ENTRY = 1
+const SIG_METADATA = 2
+
+# Entry index sentinels.
+const NO_INDEX = 0xFF
+const MAP_KEY_INDEX = 0xFE
+
+# Video item class bits (OP_VIDEO_BATCH).
+const VI_POST = 1
+const VI_PROMOTED = 2
+const VI_NORMAL = 4
+
+# OP_VIDEO_DECIDE stages.
+const VD_COPY = 0
+const VD_VERIFY = 1
+
+# OP_VIDEO_SELECT decisions.
+const VS_ACCEPT = 0
+const VS_NONE = 1
+const VS_BELOW = 2
+const VS_AMBIGUOUS = 3
+
+# OP_ACTION_NAMES results.
+const ACT_NONE = 0
+const ACT_DISMISS_AD = 1
+const ACT_ADS_INFO = 2
+const ACT_REPORT_AD = 3
+
+# OP_PROFILE results.
+const PROFILE_NONE = 0
+const PROFILE_X_12_7_1 = 1
+const PROFILE_X_12_8_0 = 2
+
+# Entry-identifier alphabet (host normalization; letters are case folded).
+const EC_OTHER = 0
+const EC_HYPHEN = 1
+const EC_DIGIT = 2
+const EC_UNDERSCORE = 3
+const EC_LETTER = 4
+const EC_P = 5
+const EC_R = 6
+const EC_O = 7
+const EC_M = 8
+const EC_T = 9
+const EC_E = 10
+const EC_D = 11
+const EC_W = 12
+
+# Action-name alphabet (case sensitive).
+const AC_OTHER = 0
+const AC_HASH = 1
+const AC_UP_P = 2
+const AC_R = 3
+const AC_O = 4
+const AC_M = 5
+const AC_T = 6
+const AC_E = 7
+const AC_D = 8
+const AC_UP_D = 9
+const AC_I = 10
+const AC_S = 11
+const AC_UP_A = 12
+const AC_UP_I = 13
+const AC_N = 14
+const AC_F = 15
+const AC_UP_R = 16
+const AC_P = 17
+
+# Version-name alphabet (OP_PROFILE).
+const VC_OTHER = 0
+const VC_CONTROL = 1
+const VC_SPACE = 2
+const VC_DOT = 3
+const VC_HYPHEN = 4
+const VC_PLUS = 5
+const VC_DIGIT_0 = 6
+
+# Render-boundary parameter roles (OP_RENDER_BOUNDARY, OP_EXACT_BOUNDARY).
+const R_OTHER = 0
+const R_COMPOSER = 1
+const R_MODIFIER = 2
+const R_LAYOUT = 3
+const R_POST = 4
+const R_INT = 5
+
+# Video-boundary parameter roles (OP_VIDEO_BOUNDARY).
+const VR_OTHER = 0
+const VR_BOOLEAN = 1
+const VR_INT = 2
+
+# OP_LIMITS response offsets.
+const LIM_WITNESS_WINDOW = 0
+const LIM_MAX_BOUNDARIES = 1
+const LIM_MAX_CALLERS = 2
+const LIM_SCAN_DEPTH = 3
+const LIM_SCAN_OBJECTS = 4
+const LIM_SCAN_ITEMS = 5
+const LIM_STACK_FRAMES = 6
+const LIM_CANDIDATE_LOG = 7
+const LIM_REFLECTION_CLASSES = 8
+const LIM_VIDEO_CLASSES = 10
+const LIMITS_SIZE = 12
+
+# Request framing limits.
+const MAX_CHUNK = 255
+const MAX_FIELDS = 255
+const MAX_ITEMS = 255
+
+# Runtime (bf_engine.c).
+const RUNTIME_TAPE_MAX = 256
+const RUNTIME_IN_CAP = 1048576
+const RUNTIME_OUT_CAP = 1024
+const BUDGET_BASE = 65536
+const BUDGET_PER_BYTE = 64

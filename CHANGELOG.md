@@ -2,6 +2,33 @@
 
 All notable changes to Twitter Hide Ads are documented here.
 
+## 3.0.0 - 2026-09-26
+
+- Move the filtering and decision policy into Brainfuck, compiled ahead of time to native code (`libtwitterbf.so`): the entry-identifier grammar and ambiguity rule, verdict precedence, Video Tab item classes and batch rules, promoted action names, render and Video boundary scoring and thresholds, the exact-profile version table and the discovery limits. Android, Xposed, DexKit, reflection and collection handling stay in Java. See `docs/BRAINFUCK_ARCHITECTURE.md` and the normative specs in `docs/policy/`.
+- Adopt the ThreadsHideAds `v2.0.0` Brainfuck toolchain (source checker, IR optimizer, C emitter, reference interpreter, replay harness), with a per-request loop budget and a stack-only, stateless runtime.
+- Keep the 2.1.0 Java policy as a frozen test oracle; the parity suite compares old and new results on 411 162 cases per run, plus randomized, malformed-frame, concurrency and invariant tests, on the JVM and on arm64.
+- The render hot path makes one JNI call and allocates nothing: on a Pixel 8 Pro an organic post is classified in about 2.4 µs (was 14.9 µs), a promoted post in 1.1 µs (was 6.1 µs), a 20-item Video Tab batch in 6.8 µs (was 275 µs).
+- Fail open on any policy failure: missing library or ABI mismatch installs no hook; oversized, malformed or budget-exhausted requests keep the content.
+- Log per-render boundary observations only in debug builds, and drop the per-render diagnostic walk; add policy counters (calls, failures, fallback scans, blocks) to the block logs, with request timing in debug or `-PpolicyTiming` builds.
+- CI: split into test, build and release jobs; check generated Brainfuck output, run the Python toolchain tests and the parity suite, verify every native library in the APK; signing secrets exist only in the release job.
+- New launcher icon: a struck-through shield over the X mark, the strike running down the middle of the X's outlined bar, drawn as one vector that is also the themed icon (`docs/icon.svg`). The raster launcher and branding images are removed.
+- Rewrite the README in the ThreadsHideAds layout.
+- Increased Android `versionCode` from `33` to `34`.
+
+Also in this release (previously unreleased):
+
+
+- Classify timeline models into `PROMOTED`, `ORGANIC` or `UNKNOWN`. A confident organic entry identifier now short-circuits the reflective action-graph walk, which previously ran on every normal post rendered through an adaptive boundary, and the walk's result is cached per model instance.
+- Match entry identifiers against a strict whole-value grammar. Look-alikes such as `not-promoted-x`, `unpromoted-1` or free text containing `promoted-` no longer count as promoted.
+- Witness adaptively resolved boundaries at runtime and unhook any that see 12 invocations without a post-like model.
+- Widen the `DexFile` fallback from `com.x.urt.items.post` to the `com.x.urt`, `com.x.jetfuel` and `com.x.mappers` namespaces, post package first.
+- Build Video Tab replacements through the persistent list's own builder, resolved by shape because R8 strips it from the interface, and fail open otherwise. The dynamic-proxy list emulation is removed, and the caller stack is captured only for mixed batches that would be rewritten.
+- Redact entry identifiers in release-build logs and bound the unique-block key set to 512 entries.
+- Read the module version from `BuildConfig` and remove `assets/ad_patterns.json`, which was documentation only and had drifted from the resolver.
+- Add JVM unit tests and run them in CI. Pin GitHub Actions to commit SHAs and verify the Gradle distribution checksum.
+- Fix `scripts/check-project.sh`: negative checks written as `! cmd` never fail under `set -e`, so they are now explicit. The signing check asserts that no credential is hardcoded instead of forbidding the environment-backed `signingConfigs`.
+- Validated on device against X `12.28.0-prod.01` under Vector 2.2.
+
 ## 2.1.0 - 2026-09-09
 
 - Suppress promoted posts on every X surface instead of only the Home timeline. Post detail, search and any other surface that renders posts through the same Compose boundaries are now covered.
@@ -10,7 +37,7 @@ All notable changes to Twitter Hide Ads are documented here.
 - Accept nested entry identifiers when selecting which direct string field carries the entry ID, so post detail and search entries are reported in the logs instead of `unknown`.
 - Raised the classifier schema version from `6` to `7`.
 - Validated on device against X `12.23.1-prod.01` under Vector 2.2: 11 deoptimized boundaries installed, `enforcement=ACTIVE_ADAPTIVE`, promoted entries blocked before render on both the Home timeline and post detail, with normal posts and replies unaffected.
-- Increased Android `versionCode` from `31` to `32`.
+- Increased Android `versionCode` from `31` to `32`, then to `33` when the application id moved to `io.github.mrxsin.twitterhideads`.
 
 ## 2.0.0 - 2026-09-06
 

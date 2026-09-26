@@ -1,0 +1,7 @@
+{
+  "programs": [
+    {"id": 0, "name": "post", "source": "src/post.bf", "tape": 144},
+    {"id": 1, "name": "action", "source": "src/action.bf", "tape": 56},
+    {"id": 2, "name": "discovery", "source": "src/discovery.bf", "tape": 112}
+  ]
+}

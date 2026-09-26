@@ -6,201 +6,184 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Advertisement-classification rules shipped inside the APK.
+ * Host side of promoted-post classification.
  *
- * Validated X 12.7.1 and X 12.8.0 render models expose two ad-specific properties:
- *  - an entry ID carrying the URT "promoted-" token;
- *  - a direct com.x.models.TimelinePromotedMetadata field.
+ * This class only gathers facts: the render model's text fields and whether
+ * one of its object fields is a promoted-metadata model. The decision is made
+ * by {@code brainfuck/src/post.bf} (OP_CLASSIFY_POST, specified in
+ * docs/policy/post.md):
  *
- * Only the Home timeline names a promoted entry "promoted-tweet-...". Every
- * surface that nests a post inside a module prefixes that module's own entry,
- * so the same advertisement arrives as
- * "conversationthread-<id>-promoted-tweet-<id>-<hash>" in a post detail and as
- * "search-conversation-<id>-promoted-tweet-<id>-<hash>" in search. The token is
- * therefore matched at any segment boundary rather than only at the start.
+ *   direct promoted entry ID       -> PROMOTED
+ *   direct promoted metadata       -> PROMOTED
+ *   confident organic entry ID     -> ORGANIC
+ *   no reliable direct signal      -> action-graph fallback, else UNKNOWN
  *
- * The promoted PostActionType values discovered by the menu probes are retained
- * in {@link PromotedActionScanner} as a compatibility fallback for an unfamiliar
- * model shape. No user-specific advertiser or post IDs are required.
+ * The entry grammar itself (segment boundaries, nested module prefixes) is
+ * Brainfuck too. The reflective {@link PromotedActionScanner} walk is reserved
+ * for models the policy cannot decide directly, and its result is cached per
+ * model instance because Compose recomposes the same model repeatedly. When a
+ * policy request fails for any reason the model is kept.
  */
 final class BundledAdPatterns {
-    static final String SCHEMA_VERSION = "7";
-    static final String PROMOTED_METADATA_CLASS =
-            "com.x.models.TimelinePromotedMetadata";
+    static final String SCHEMA_VERSION = "9-bf" + BfAbi.ABI_MAJOR;
 
-    /** URT names every promoted entry with this token, wherever it is nested. */
-    private static final String PROMOTED_ENTRY_TOKEN = "promoted-";
+    /** {@link #classifyPacked} result bits. */
+    static final int PROMOTED = 1;
+    static final int IDENTIFIES_POST = 2;
 
-    private static final String PROMOTED_METADATA_SUFFIX = "PromotedMetadata";
+    private static final Set<String> NO_SIGNALS = Collections.emptySet();
 
     private static final ConcurrentHashMap<Class<?>, DirectAccess> DIRECT_ACCESS =
             new ConcurrentHashMap<>();
+    private static final IdentityCache<Classification> FALLBACK_RESULTS =
+            new IdentityCache<>(256);
 
     private BundledAdPatterns() {
     }
 
+    /**
+     * Allocation-free classification for the render hot path: {@link #PROMOTED}
+     * and {@link #IDENTIFIES_POST} bits.
+     */
+    static int classifyPacked(Object model, String expectedRenderModel, boolean allowActionFallback) {
+        if (model == null) {
+            return 0;
+        }
+        DirectAccess access = DIRECT_ACCESS.computeIfAbsent(model.getClass(), DirectAccess::resolve);
+        int verdict;
+        String entryId = null;
+        boolean entry;
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_CLASSIFY_POST);
+        try {
+            if (!access.request(frame, model, expectedRenderModel, allowActionFallback)) {
+                return 0;
+            }
+            verdict = frame.out(0);
+            int index = frame.out(1);
+            entry = index != BfAbi.NO_INDEX;
+            if (verdict == BfAbi.V_NEED_FALLBACK && entry) {
+                entryId = frame.refs[index].toString();
+            }
+        } finally {
+            frame.release();
+        }
+        if (verdict == BfAbi.V_PROMOTED) {
+            return PROMOTED | IDENTIFIES_POST;
+        }
+        if (verdict != BfAbi.V_NEED_FALLBACK) {
+            return entry ? IDENTIFIES_POST : 0;
+        }
+        Classification fallback = fallback(model, entryId);
+        return (fallback.promoted() ? PROMOTED : 0) | (fallback.identifiesPost() ? IDENTIFIES_POST : 0);
+    }
+
+    /** Full classification with entry ID and signals, for logging and tests. */
     static Classification classifyTimelinePost(
             Object model,
             String expectedRenderModel,
             boolean allowActionFallback
     ) {
         if (model == null) {
-            return Classification.NORMAL;
+            return Classification.UNKNOWN;
+        }
+        DirectAccess access = DIRECT_ACCESS.computeIfAbsent(model.getClass(), DirectAccess::resolve);
+        PolicyFrame frame = PolicyFrame.begin(BfAbi.OP_CLASSIFY_POST);
+        int verdict;
+        int signals;
+        String entryId;
+        try {
+            if (!access.request(frame, model, expectedRenderModel, allowActionFallback)) {
+                return Classification.UNKNOWN;
+            }
+            verdict = frame.out(0);
+            int index = frame.out(1);
+            signals = frame.out(2);
+            entryId = index < frame.refCount ? frame.refs[index].toString() : null;
+        } finally {
+            frame.release();
         }
 
-        DirectAccess access = DIRECT_ACCESS.computeIfAbsent(
-                model.getClass(),
-                DirectAccess::resolve
-        );
-
-        String entryId = null;
-        boolean promotedEntry = false;
-        boolean promotedMetadata = false;
-
-        for (Field field : access.stringFields) {
-            Object value = Reflect.read(field, model);
-            if (!(value instanceof CharSequence)) {
-                continue;
+        switch (verdict) {
+            case BfAbi.V_PROMOTED: {
+                LinkedHashSet<String> names = new LinkedHashSet<>();
+                if ((signals & BfAbi.SIG_ENTRY) != 0) {
+                    names.add("entryId:promoted");
+                }
+                if ((signals & BfAbi.SIG_METADATA) != 0) {
+                    names.add("PromotedMetadata");
+                }
+                return new Classification(Verdict.PROMOTED, entryId, names, false);
             }
-            String text = value.toString();
-            if (entryId == null && isLikelyEntryField(field, text)) {
-                entryId = text;
-            }
-            if (isPromotedEntryId(text)) {
-                promotedEntry = true;
-                entryId = text;
-                break;
-            }
+            case BfAbi.V_ORGANIC:
+                return new Classification(Verdict.ORGANIC, entryId, NO_SIGNALS, false);
+            case BfAbi.V_NEED_FALLBACK:
+                return fallback(model, entryId);
+            default:
+                return new Classification(Verdict.UNKNOWN, entryId, NO_SIGNALS, false);
         }
+    }
 
-        for (Field field : access.objectFields) {
-            Object value = Reflect.read(field, model);
-            if (isPromotedMetadata(value)) {
-                promotedMetadata = true;
-                break;
-            }
+    private static Classification fallback(Object model, String entryId) {
+        Classification cached = FALLBACK_RESULTS.get(model);
+        if (cached != null) {
+            return cached;
         }
-
-        if (promotedEntry || promotedMetadata) {
-            LinkedHashSet<String> signals = new LinkedHashSet<>();
-            if (promotedEntry) {
-                signals.add("entryId:promoted-");
-            }
-            if (promotedMetadata) {
-                signals.add("TimelinePromotedMetadata");
-            }
-            return new Classification(true, entryId, signals, false);
-        }
-
-        // Validated render models have definitive direct fields. Avoid a graph
-        // walk for every normal timeline item on supported X versions.
-        if (expectedRenderModel != null
-                && expectedRenderModel.equals(model.getClass().getName())) {
-            return new Classification(
-                    false,
-                    entryId,
-                    Collections.<String>emptySet(),
-                    false
-            );
-        }
-
-        if (!allowActionFallback) {
-            return new Classification(
-                    false,
-                    entryId,
-                    Collections.<String>emptySet(),
-                    false
-            );
-        }
-
+        PolicyStats.fallback();
         PromotedActionScanner.Match actionMatch = PromotedActionScanner.inspect(model);
-        if (actionMatch.promoted) {
-            return new Classification(
-                    true,
-                    entryId,
-                    actionMatch.actions,
-                    true
-            );
-        }
-
-        return new Classification(
-                false,
+        Classification result = new Classification(
+                actionMatch.promoted ? Verdict.PROMOTED : Verdict.UNKNOWN,
                 entryId,
-                Collections.<String>emptySet(),
+                actionMatch.promoted ? actionMatch.actions : NO_SIGNALS,
                 actionMatch.used
         );
+        FALLBACK_RESULTS.put(model, result);
+        return result;
     }
 
-    /**
-     * True when {@code value} carries the URT promoted token, either as the
-     * whole entry ID or as one of its "-" separated segments.
-     */
-    private static boolean isPromotedEntryId(String value) {
-        if (value == null) {
-            return false;
-        }
-        String lower = value.toLowerCase(Locale.ROOT);
-        return lower.startsWith(PROMOTED_ENTRY_TOKEN)
-                || lower.contains("-" + PROMOTED_ENTRY_TOKEN);
-    }
-
-    private static boolean isLikelyEntryField(Field field, String value) {
-        if (value == null) {
-            return false;
-        }
-        String lowerName = field.getName().toLowerCase(Locale.ROOT);
-        String lowerValue = value.toLowerCase(Locale.ROOT);
-        return "a".equals(field.getName())
-                || lowerName.contains("entry")
-                || lowerValue.startsWith("tweet-")
-                || lowerValue.contains("-tweet-")
-                || isPromotedEntryId(lowerValue);
-    }
-
-    /**
-     * X obfuscates the promoted-metadata class away on recent releases, so the
-     * validated name is only the fast path and any model class still named
-     * after it counts as the same signal.
-     */
-    private static boolean isPromotedMetadata(Object value) {
-        if (value == null) {
-            return false;
-        }
-        String name = value.getClass().getName();
-        return PROMOTED_METADATA_CLASS.equals(name)
-                || name.endsWith(PROMOTED_METADATA_SUFFIX);
+    enum Verdict {
+        PROMOTED,
+        ORGANIC,
+        UNKNOWN
     }
 
     static final class Classification {
-        static final Classification NORMAL = new Classification(
-                false,
+        static final Classification UNKNOWN = new Classification(
+                Verdict.UNKNOWN,
                 null,
-                Collections.<String>emptySet(),
+                NO_SIGNALS,
                 false
         );
 
-        final boolean promoted;
+        final Verdict verdict;
         final String entryId;
         final Set<String> signals;
         final boolean actionFallbackUsed;
 
         Classification(
-                boolean promoted,
+                Verdict verdict,
                 String entryId,
                 Set<String> signals,
                 boolean actionFallbackUsed
         ) {
-            this.promoted = promoted;
+            this.verdict = verdict;
             this.entryId = entryId;
-            this.signals = Collections.unmodifiableSet(
-                    new LinkedHashSet<>(signals)
-            );
+            this.signals = signals.isEmpty()
+                    ? NO_SIGNALS
+                    : Collections.unmodifiableSet(new LinkedHashSet<>(signals));
             this.actionFallbackUsed = actionFallbackUsed;
+        }
+
+        boolean promoted() {
+            return verdict == Verdict.PROMOTED;
+        }
+
+        /** True when the model looked like a timeline post at all. */
+        boolean identifiesPost() {
+            return entryId != null || verdict == Verdict.PROMOTED;
         }
 
         String stableLogKey(Object model) {
@@ -213,16 +196,45 @@ final class BundledAdPatterns {
         }
     }
 
+    /** Cached per render-model class: which fields carry the facts. */
     private static final class DirectAccess {
-        final List<Field> stringFields;
-        final List<Field> objectFields;
+        final Field[] stringFields;
+        final Field[] objectFields;
 
-        DirectAccess(
-                List<Field> stringFields,
-                List<Field> objectFields
-        ) {
-            this.stringFields = stringFields;
-            this.objectFields = objectFields;
+        DirectAccess(List<Field> stringFields, List<Field> objectFields) {
+            this.stringFields = stringFields.toArray(new Field[0]);
+            this.objectFields = objectFields.toArray(new Field[0]);
+        }
+
+        /** Encodes OP_CLASSIFY_POST for {@code model} and runs it. */
+        boolean request(PolicyFrame frame, Object model, String expectedRenderModel, boolean allowFallback) {
+            boolean metadata = false;
+            for (Field field : objectFields) {
+                if (PromotedMetadata.isInstance(Reflect.read(field, model))) {
+                    metadata = true;
+                    break;
+                }
+            }
+            frame.bool(expectedRenderModel != null && expectedRenderModel.equals(model.getClass().getName()));
+            frame.bool(allowFallback);
+            frame.bool(metadata);
+            int countAt = frame.position();
+            frame.u8(0);
+            int count = 0;
+            for (Field field : stringFields) {
+                Object value = Reflect.read(field, model);
+                if (!(value instanceof CharSequence)) {
+                    continue;
+                }
+                if (count == BfAbi.MAX_FIELDS || !frame.ref(value)) {
+                    return false;
+                }
+                frame.entryText((CharSequence) value);
+                count++;
+            }
+            frame.patch(countAt, count);
+            return frame.send(BfAbi.PROG_POST, 3) && frame.out(0) <= BfAbi.V_NEED_FALLBACK
+                    && (frame.out(1) < count || frame.out(1) == BfAbi.NO_INDEX);
         }
 
         static DirectAccess resolve(Class<?> type) {
@@ -240,43 +252,19 @@ final class BundledAdPatterns {
                 }
 
                 Class<?> declared = field.getType();
-                if (CharSequence.class.isAssignableFrom(declared)
-                        || declared == String.class) {
+                if (CharSequence.class.isAssignableFrom(declared)) {
                     strings.add(field);
-                }
-                if (!declared.isPrimitive()) {
+                } else if (!declared.isPrimitive()) {
                     objects.add(field);
                 }
             }
 
-            strings.sort((left, right) -> fieldPriority(left) - fieldPriority(right));
             objects.sort((left, right) -> objectFieldPriority(left) - objectFieldPriority(right));
-            return new DirectAccess(
-                    Collections.unmodifiableList(strings),
-                    Collections.unmodifiableList(objects)
-            );
-        }
-
-        private static int fieldPriority(Field field) {
-            if ("a".equals(field.getName())) {
-                return 0;
-            }
-            if (field.getName().toLowerCase(Locale.ROOT).contains("entry")) {
-                return 1;
-            }
-            return 2;
+            return new DirectAccess(strings, objects);
         }
 
         private static int objectFieldPriority(Field field) {
-            String typeName = field.getType().getName();
-            if (PROMOTED_METADATA_CLASS.equals(typeName)
-                    || typeName.endsWith(PROMOTED_METADATA_SUFFIX)) {
-                return 0;
-            }
-            if ("m".equals(field.getName())) {
-                return 1;
-            }
-            return 2;
+            return PromotedMetadata.isType(field.getType().getName()) ? 0 : 1;
         }
     }
 }

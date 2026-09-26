@@ -10,7 +10,7 @@ import io.github.libxposed.api.XposedModule;
 
 /** Modern Xposed API entry point. Scoped to com.twitter.android. */
 public final class ModuleMain extends XposedModule {
-    private static final String MODULE_VERSION = "2.1.0";
+    private static final String MODULE_VERSION = BuildConfig.VERSION_NAME;
 
     private static final AtomicBoolean ATTACH_HOOK_INSTALLED =
             new AtomicBoolean(false);
@@ -82,6 +82,11 @@ public final class ModuleMain extends XposedModule {
             return;
         }
 
+        if (!NativePolicy.load()) {
+            ModuleRuntime.log("Brainfuck policy core unavailable; fail-open mode active: "
+                    + NativePolicy.failure());
+            return;
+        }
         Context context = rawContext instanceof Context ? (Context) rawContext : null;
         CompatibilityProfile.DetectedVersion detected =
                 CompatibilityProfile.detect(context);
@@ -90,10 +95,12 @@ public final class ModuleMain extends XposedModule {
         ModuleRuntime.log("Detected X version=" + detected.displayName()
                 + ", versionCode=" + detected.displayCode()
                 + ", exactProfile=" + (exact == null ? "none" : exact.id)
-                + ", adaptiveResolver=ENABLED");
+                + ", adaptiveResolver=ENABLED"
+                + ", policyCore=brainfuck-aot abi=" + BfAbi.ABI_MAJOR + "." + BfAbi.ABI_MINOR);
 
         installTimelineBlocker(context, detected, exact);
         installVideoDatasetFilter(context, detected);
+        PolicyStats.resetTiming();
     }
 
     private void installTimelineBlocker(
