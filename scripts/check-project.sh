@@ -38,6 +38,9 @@ test -n "$VERSION_CODE"
 grep -q 'versionName = appVersion' "$APP_GRADLE"
 grep -q "^## $APP_VERSION " "$CHANGELOG"
 grep -Fq "\`$APP_VERSION\` (\`versionCode $VERSION_CODE\`)" "$README"
+# The release job publishes docs/releases/v<version>.md as the release body.
+test -f "$ROOT/docs/releases/v$APP_VERSION.md"
+grep -q "Android version code: \`$VERSION_CODE\`" "$ROOT/docs/releases/v$APP_VERSION.md"
 refute grep -qi 'entirely written in Brainfuck' "$README"
 
 grep -q 'compileOnly("io.github.libxposed:api:102.0.0")' "$APP_GRADLE"

@@ -98,6 +98,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Download release APK
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -121,5 +123,7 @@ jobs:
         with:
           files: ${{ steps.sign_app.outputs.signedReleaseFile }}
           tag_name: ${{ github.ref_name }}
+          name: Twitter Hide Ads ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
