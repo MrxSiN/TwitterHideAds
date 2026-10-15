@@ -1,0 +1,60 @@
+name: Sync release to Xposed-Modules-Repo
+
+# Mirrors each GitHub release (with its APK) to
+# github.com/Xposed-Modules-Repo/<package>, which feeds modules.lsposed.org.
+# workflow_run is used because releases created with github.token do not
+# trigger other workflows, but a finished CI run always does.
+on:
+  workflow_run:
+    workflows: [ "Android CI & Release" ]
+    types: [ completed ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source release tag to sync (e.g. v3.0.0)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xposed-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      SRC: ${{ github.repository }}
+    steps:
+      - name: Download source release APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" -R "$SRC" --json body -q .body > notes.md
+          gh release download "$TAG" -R "$SRC" -p '*.apk' -D apk
+          ls apk
+
+      - name: Mirror to Xposed-Modules-Repo
+        env:
+          GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        run: |
+          apk=$(ls apk/*.apk | head -1)
+          aapt=$(ls "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -1)
+          badging=$("$aapt" dump badging "$apk" | head -1)
+          pkg=$(sed -n "s/.* name='\([^']*\)'.*/\1/p" <<<"$badging")
+          code=$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" <<<"$badging")
+          name=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<<"$badging")
+          dst="Xposed-Modules-Repo/$pkg"
+          dtag="$code-$name"
+          echo "$SRC@$TAG -> $dst@$dtag"
+          if gh release view "$dtag" -R "$dst" >/dev/null 2>&1; then
+            gh release upload "$dtag" "$apk" -R "$dst" --clobber
+          else
+            gh release create "$dtag" "$apk" -R "$dst" --title "$name" --notes-file notes.md --latest
+          fi
