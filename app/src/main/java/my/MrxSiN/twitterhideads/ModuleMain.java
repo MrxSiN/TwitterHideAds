@@ -138,6 +138,7 @@ public final class ModuleMain extends XposedModule {
             VideoDatasetResolver.Resolution videoResolution =
                     VideoDatasetResolver.resolve(context, hostClassLoader, detected);
             VideoDatasetFilter.install(videoResolution);
+            RtbAdFilter.install(videoResolution.method, context, detected);
         } catch (Throwable throwable) {
             ModuleRuntime.log(
                     "Video dataset filter failed; timeline blocker remains active",

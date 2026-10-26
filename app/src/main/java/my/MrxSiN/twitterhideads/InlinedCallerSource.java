@@ -3,6 +3,8 @@ package my.MrxSiN.twitterhideads;
 import org.luckypray.dexkit.DexKitBridge;
 import org.luckypray.dexkit.result.MethodData;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -25,14 +27,21 @@ final class InlinedCallerSource {
     static List<Method> find(
             String apkPath,
             ClassLoader classLoader,
-            List<Method> boundaries
+            List<? extends Executable> boundaries
     ) {
         // Upper bound on deoptimized callers, which then run interpreted or JIT-compiled.
         int maxCallers = PolicyLimits.maxCallers();
         Map<String, Method> callers = new LinkedHashMap<>();
+        try {
+            System.loadLibrary("dexkit");
+        } catch (Throwable ignored) {
+            // DexKitBridge.create reports it below
+        }
         try (DexKitBridge bridge = DexKitBridge.create(apkPath)) {
-            for (Method boundary : boundaries) {
-                MethodData data = bridge.getMethodData(boundary);
+            for (Executable boundary : boundaries) {
+                MethodData data = boundary instanceof Constructor<?>
+                        ? bridge.getMethodData((Constructor<?>) boundary)
+                        : bridge.getMethodData((Method) boundary);
                 if (data == null) {
                     continue;
                 }
@@ -55,8 +64,10 @@ final class InlinedCallerSource {
             AdaptiveHookResolver.log("Inlined caller lookup failed; boundaries may be bypassed "
                     + "by AOT-inlined call sites: " + Reflect.describeThrowable(throwable));
         }
-        for (Method boundary : boundaries) {
-            callers.remove(AdaptiveBoundaryCache.signature(boundary));
+        for (Executable boundary : boundaries) {
+            if (boundary instanceof Method) {
+                callers.remove(AdaptiveBoundaryCache.signature((Method) boundary));
+            }
         }
         return new ArrayList<>(callers.values());
     }

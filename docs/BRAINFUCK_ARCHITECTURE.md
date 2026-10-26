@@ -62,6 +62,7 @@ byte-out Brainfuck program can own; everything with side effects stays out.
 | witness state machine | atomic compare-and-set across render threads |
 | Kotlin persistent-list rebuilding, argument replacement | Java collections |
 | caches (APK fingerprint, SharedPreferences, identity cache), logging, redaction | I/O and Java state |
+| RTB ad items (3.1.0, `RtbAdFilter`): an item class is an ad when its data-class `toString` starts with `UrtTimelineRtb` | a class-identity fact, like the `*PromotedMetadata` name test; no policy to score |
 
 ## ABI (version 1.0)
 

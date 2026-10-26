@@ -80,3 +80,44 @@ Runtime enforcement is additionally gated by a `com.x.video.tab.*` caller stack 
 The original immutable list is never mutated. The copy is built through kotlinx.collections.immutable's own `builder()`/`build()` pair. R8 strips those members from the interface (`kotlinx.collections.immutable.b` declares nothing on X 12.28.0) and keeps them on the implementation classes (`immutableList.a#c()` returns the concrete builder `immutableList.d`), so `PersistentListCopier` resolves the pair by shape, once per runtime class. A runtime type without that shape fails open; no list interface is emulated. The replacement is inspected again and rejected unless promoted count is zero and all normal posts remain.
 
 The caller stack is captured only after the batch is known to be a mixed batch that would be rewritten, so ordinary paging calls never pay for it.
+
+## RTB ads (X 12.37)
+
+X 12.37.2 (`312372001`) added real-time-bidding ads served through Google
+SSP. They are timeline items of their own, not posts:
+
+```text
+UrtTimelineRtbImageAd           com.x.models.timelines.items.r1
+UrtTimelineModule(innerContent=[UrtTimelineModuleItem(item=UrtTimelineRtbImageAd(..))])
+                                conversations wrap each one in its own module
+```
+
+No post render boundary ever sees them, so on 12.37.2 they showed on Home, in
+conversations and as full pages in the Video Tab while promoted posts were
+still blocked. The obfuscated class is recognised by its data-class
+`toString` prefix (`UrtTimelineRtb`), decided once per runtime class.
+`RtbAdFilter` (Java, not Brainfuck: it is a class-identity fact, like the
+`*PromotedMetadata` name test) removes them in two places:
+
+- **Paging state** `com.x.urt.b2`, the declaring class of the Video Tab copy
+  method: its constructor drops RTB items and modules that only wrap RTB
+  items. The Video Tab pager (`com.x.video.tab.d6`, `instanceof r1` then
+  `com.x.googlessp.impl.l0.d`) and conversations read this list. ART inlines
+  the constructor, so its callers (16 on 12.37.2) are deoptimized; without
+  that the hook ran once per process.
+- **Item mapper** `com.x.urt.b.a(int, o0, go, u1, t0)`: Home items come from
+  the timeline database (CBOR) without that state. When Google SSP is off the
+  mapper already returns X's empty presenter `com.x.urt.b0.a` for an RTB item;
+  the hook returns it for every RTB item, so nothing is drawn and no gap is
+  left.
+
+Discovery runs through DexKit once per X build and is cached
+(`twitterhideads_rtb_cache`): RTB classes are items whose `toString` uses a
+string starting `UrtTimelineRtb`; the mapper is the only caller outside
+`com.x.googlessp` of a googlessp method taking one that also reads exactly one
+self-typed static presenter. Anything ambiguous skips the mapper hook.
+
+Not used: hooking the googlessp item renderers (`com.x.googlessp.impl.y` and
+`x0`, both `com.x.urt.t1` implementations). `y` draws RTB ads, but `x0` draws
+every Event Summary (`UrtTimelineEventSummary`, `m0`), which routes through
+googlessp on 12.37.2, so a package-wide renderer rule hides real content.
