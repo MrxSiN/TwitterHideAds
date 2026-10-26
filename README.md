@@ -4,9 +4,9 @@
 
 # Twitter Hide Ads
 
-**An Xposed module that removes promoted posts from X, with its ad policy written in Brainfuck. Yes, really.**
+**An Xposed module that removes promoted posts and ads from X, with its ad policy written in Brainfuck. Yes, really.**
 
-Promoted posts are stopped before X draws them, not hidden after.
+Promoted posts and ads are stopped before X draws them, not hidden after.
 
 <br>
 
@@ -14,6 +14,8 @@ Promoted posts are stopped before X draws them, not hidden after.
 [![Downloads](https://img.shields.io/github/downloads/MrxSiN/TwitterHideAds/total?color=3DDC84&logo=android&logoColor=fff&style=for-the-badge)](https://github.com/MrxSiN/TwitterHideAds/releases)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=fff&style=for-the-badge)](#requirements)
 [![libxposed](https://img.shields.io/badge/libxposed-API%20102-E8A33D?style=for-the-badge)](https://github.com/libxposed/api)
+
+**English** · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Bahasa Indonesia](README.id.md)
 
 </div>
 
@@ -56,6 +58,7 @@ post is classified in about 2 µs on a Pixel 8 Pro — several times faster than
 |---|---|
 | 🧹 **Stopped before render** | Promoted posts are declined at the Compose render boundary, so there is no blank gap and no flash of an ad. |
 | 🌐 **Every surface** | Home, post detail, search and anything else that renders posts through the same boundaries; the Video Tab is filtered at its data layer. |
+| 📰 **Google ads too** | The real-time-bidding ads X 12.37 serves through Google SSP are removed from the timeline data on Home, in conversations and in the Video Tab. |
 | 🔎 **Survives renames** | DexKit finds the render boundaries by structure, cached per X version and APK fingerprint; an X update triggers a rescan. |
 | 🧠 **Policy in Brainfuck, compiled** | Every decision is hand-written Brainfuck, compiled ahead of time to native code. One native call per post, no allocations. |
 | 🛟 **Fails open** | Anything the module cannot classify is left alone. A failed policy request keeps the post. |
@@ -80,6 +83,12 @@ Look-alikes such as `not-promoted-x`, `unpromoted-1`, `promoted-deal` or free te
 promoted post actions (`PromotedDismissAd`, `PromotedAdsInfo`, `PromotedReportAd`). Organic posts,
 replies and cursor, paging and control entries are never touched.
 
+Since X 12.37 X also serves **real-time-bidding ads** through Google SSP. They are timeline items of
+their own (`UrtTimelineRtbImageAd`), not posts, so no post boundary sees them. They are recognised
+by that data-class name and removed from the timeline data; a conversation module is removed only
+when everything inside it is such an ad. Event Summaries, which X 12.37 also routes through its
+Google SSP code, are left alone.
+
 <details open>
 <summary><b>🧱 The two layers</b></summary>
 <br>
@@ -88,6 +97,7 @@ replies and cursor, paging and control entries are never touched.
 |---|---|---|
 | **Render boundaries** | the static Compose functions that draw a post, found by DexKit (9 on X 12.28.0) | Classifies the post model before the call; a promoted post returns without `chain.proceed()`. Each boundary is deoptimized so ART cannot run an inlined copy past the hook, and each must prove at runtime that it renders timeline entries or it is unhooked. |
 | **Video Tab dataset** | the URT state-copy method that receives the tab's paging batch, found by structure | Rebuilds the Kotlin persistent list without promoted videos through the list's own builder, before the pager is created. Anything it cannot rebuild exactly is left alone. |
+| **RTB ads** | the URT paging state's constructor and the timeline item-to-presenter mapper, found by DexKit once per X build | The paging state is built without RTB ads (Video Tab, conversations); the mapper hands an RTB ad on Home to X's own empty presenter, which X itself uses when Google SSP is off, so nothing is drawn and no gap is left. The constructor's inlined callers are deoptimized. Anything ambiguous installs nothing. |
 
 </details>
 
@@ -95,12 +105,13 @@ replies and cursor, paging and control entries are never touched.
 
 ## Status
 
-**v3.0.0.** The filtering and decision policy moved from Java into three hand-written Brainfuck
-programs, compiled ahead of time. The 2.1.0 Java policy was frozen as an oracle first, and the new
-programs answer identically over hundreds of thousands of randomized and exhaustive cases on the JVM
-and on an arm64 phone ([`docs/BRAINFUCK_ARCHITECTURE.md`](docs/BRAINFUCK_ARCHITECTURE.md)).
+**v3.1.0.** Removes the Google SSP real-time-bidding ads X 12.37 added on Home, in conversations and
+in the Video Tab, and adds a translated module description (14 languages) and user README
+(8 languages). The policy core is unchanged since v3.0.0, which moved it from Java into three
+hand-written Brainfuck programs, compiled ahead of time and checked against the frozen 2.1.0 Java
+policy over hundreds of thousands of cases ([`docs/BRAINFUCK_ARCHITECTURE.md`](docs/BRAINFUCK_ARCHITECTURE.md)).
 
-The release version is `3.0.0` (`versionCode 34`).
+The release version is `3.1.0` (`versionCode 35`).
 
 ### Compatibility
 
@@ -109,15 +120,16 @@ adding a row.
 
 | Device | Android | Framework | X | Module | Result | Tester | Date |
 |---|---|---|---|---|---|---|---|
+| Pixel 8 Pro | 17 | Vector 2.2 (API 102) | 12.37.2-prod.01 | 3.1.0 | 9 boundaries; RTB ads removed: 0 ads on 65 Home, conversation and Video Tab screens in each of 3 passes, promoted posts blocked, no crashes | @MrxSiN | 2026-10 |
 | Pixel 8 Pro | 17 | Vector 2.2 (API 102) | 12.28.0-prod.01 | 3.0.0 | 9 boundaries, 45+ promoted posts blocked on Home and post detail, 2–4 promoted videos removed per Video Tab batch, paging intact | @MrxSiN | 2026-09 |
 | Pixel 8 Pro | 17 | Vector 2.2 (API 102) | 12.23.1-prod.01 | 2.1.0 | 11 boundaries, promoted posts blocked on Home and post detail | @MrxSiN | 2026-09 |
 
 ### Known limits
 
-- **Search**: no promoted search entry was served during the 3.0.0 test session. Search uses the
+- **Search**: no promoted search entry was served during the 3.0.0 or 3.1.0 test sessions. Search uses the
   same render boundaries and the same identifier grammar, and the tests cover it, but it has not
-  been observed on a device for 3.0.0.
-- **LSPatch** needs a build that loads libxposed API 102 modules; 3.0.0 has not been tried under it.
+  been observed on a device.
+- **LSPatch** needs a build that loads libxposed API 102 modules; 3.1.0 has not been tried under it.
 - 32-bit and x86 devices ship the native library but have not been run.
 - A batch with more than 255 items or a model with more than 255 text fields is left alone.
 
@@ -150,6 +162,8 @@ Detected X version=12.28.0-prod.01, ..., policyCore=brainfuck-aot abi=1.0
 Initialization complete: resolver=adaptive, boundaries=9, installedHooks=9, enforcement=ACTIVE_ADAPTIVE, ...
 Blocked promoted post before Compose: boundary=adaptive-a.h, entryId=promoted-tweet-<n>-<n>, ...
 Filtered promoted videos before pager creation: originalSize=24, filteredSize=22, removed=2, ...
+RTB ad filter initialized: state=com.x.urt.b2, stateHooks=1, mapper=..., callers=16, deoptimized=16, ...
+Mapped RTB ad to the empty presenter: mapped=1
 ```
 
 Release builds redact entry identifiers to their shape, so an exported log carries no post ids.
@@ -280,6 +294,7 @@ ModuleMain          libxposed entry and bootstrap
 TwitterAdBlocker    render-boundary hooks, witness, deoptimization
 *Resolver, *Source  DexKit and DexFile discovery, caches
 VideoDataset*       the Video Tab dataset hook and persistent-list rebuilding
+RtbAdFilter         RTB (Google SSP) ads: paging-state and item-mapper hooks
 ```
 
 The layering, ABI, parity method and measurements are in
@@ -291,6 +306,7 @@ The layering, ABI, parity method and measurements are in
 | Problem | Try |
 |---|---|
 | Promoted posts still appear | Check the log for `enforcement=ACTIVE_ADAPTIVE`. `FAIL_OPEN_NO_BOUNDARY` means no boundary was resolved. |
+| Ads with an "Ad" label and an Open/Install button still appear | Those are RTB ads. Check `RTB ad filter initialized` for `mapper=none` or `stateHooks=0` and report the line with the X version. |
 | `Brainfuck policy core unavailable` | `libtwitterbf.so` could not load for the device ABI. Reinstall the module APK. |
 | `Brainfuck policy request failed open` | A request was malformed or too large and the content was kept. Report the logged `op` and `kind`. |
 | Hooks install but nothing is blocked | Check `deoptimized=` in the initialization line; `0` with `deoptimizeSupported=false` means the framework interface never attached. |

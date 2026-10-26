@@ -2,6 +2,18 @@
 
 All notable changes to Twitter Hide Ads are documented here.
 
+## 3.1.0 - 2026-10-27
+
+- Remove the real-time-bidding ads X 12.37 serves through Google SSP (`UrtTimelineRtbImageAd`, `com.x.models.timelines.items.r1` on 12.37.2). They are timeline items, not posts, so no post render boundary saw them and they showed on Home, in conversations and as full pages in the Video Tab while promoted posts were still blocked.
+- New `RtbAdFilter`: the URT paging state's constructor drops RTB items, and conversation modules that only wrap RTB items, before the state is built (Video Tab, conversations); the timeline item-to-presenter mapper returns X's own empty presenter for an RTB item on Home, so nothing is drawn and no gap is left. The constructor's AOT-inlined callers are deoptimized; without that the hook ran once per process.
+- Find the mapper and the empty presenter by structure through DexKit, once per X build, and cache them with the inlined callers per APK fingerprint (`twitterhideads_rtb_cache`). An ambiguous result installs no mapper hook. Event Summaries, which 12.37.2 also renders through its Google SSP package, are left alone.
+- `InlinedCallerSource` accepts constructors and loads the DexKit native library itself; it previously failed with `UnsatisfiedLinkError` when the resolver had been served from cache.
+- Translate the module description shown by Vector and LSPosed into 14 languages (Simplified and Traditional Chinese, Spanish, Portuguese, Russian, Japanese, Korean, Indonesian, Hindi, Arabic, Turkish, Vietnamese, French, German) and reword it for users: "Hides promoted posts and ads in X before they are drawn". The app name is no longer translatable.
+- Add a short user README in Simplified Chinese, Traditional Chinese, Spanish, Portuguese, Russian, Japanese, Korean and Indonesian, with a language bar on every README (#1).
+- Document the 12.37 findings in `HOOK_NOTES.md` and the RTB rule in `docs/BRAINFUCK_ARCHITECTURE.md`.
+- Validated on device against X `12.37.2-prod.01` under Vector 2.2.
+- Increased Android `versionCode` from `34` to `35`.
+
 ## 3.0.0 - 2026-09-26
 
 - Move the filtering and decision policy into Brainfuck, compiled ahead of time to native code (`libtwitterbf.so`): the entry-identifier grammar and ambiguity rule, verdict precedence, Video Tab item classes and batch rules, promoted action names, render and Video boundary scoring and thresholds, the exact-profile version table and the discovery limits. Android, Xposed, DexKit, reflection and collection handling stay in Java. See `docs/BRAINFUCK_ARCHITECTURE.md` and the normative specs in `docs/policy/`.

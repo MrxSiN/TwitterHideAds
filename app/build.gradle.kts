@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
 }
 
-val appVersion = "3.0.0"
+val appVersion = "3.1.0"
 
 val envKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 val envKeystoreAlias = System.getenv("ANDROID_KEYSTORE_ALIAS")
@@ -40,7 +40,7 @@ android {
         applicationId = "io.github.mrxsin.twitterhideads"
         minSdk = 26
         targetSdk = 36
-        versionCode = 34
+        versionCode = 35
         versionName = appVersion
         // Brainfuck request timing in PolicyStats: debug builds, or -PpolicyTiming.
         buildConfigField("boolean", "POLICY_TIMING", project.hasProperty("policyTiming").toString())

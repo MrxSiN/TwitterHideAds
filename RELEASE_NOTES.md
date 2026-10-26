@@ -1,46 +1,38 @@
-# Twitter Hide Ads v3.0.0
+# Twitter Hide Ads v3.1.0
 
-## A hand-written Brainfuck policy core, compiled ahead of time
+## Google SSP ads removed, and the module speaks 14 languages
 
-This release moves every filtering decision into Brainfuck, without changing what the module removes.
+X 12.37 started showing real-time-bidding ads served through Google SSP. They are not posts, so 3.0.0 never saw them: they appeared on Home, between conversation replies and as full pages in the Video Tab, while promoted posts were still blocked. This release removes them.
 
-### Changed
+### Fixed
 
-- The filtering and decision policy is now three hand-written Brainfuck programs in `libtwitterbf.so` (`brainfuck/src/post.bf`, `action.bf`, `discovery.bf`), compiled ahead of time to C and then to native code with the NDK. There is no interpreter in the APK.
-  - `post`: the entry-identifier grammar (segment boundaries, nested `conversationthread-…` and `search-conversation-…` prefixes, the 256-character limit), the "mentions promoted" ambiguity rule, verdict precedence, Video Tab item classes, the safe-mixed-batch rule and the copy and verification checks.
-  - `action`: whether a value found by the fallback walk names a promoted post action.
-  - `discovery`: render and Video Tab boundary eligibility, scores and thresholds, the exact-profile version table, and the discovery and traversal limits.
-- Hooks, DexKit discovery, reflection, caching and Kotlin list rebuilding stay in Java. Each render makes one `@FastNative` call with the post's text fields and a metadata flag, and allocates nothing.
-- Faster on a Pixel 8 Pro (release build): an organic post is classified in 2.4 µs (was 14.9 µs), a promoted post in 1.1 µs (was 6.1 µs), a 20-item Video Tab batch in 6.8 µs (was 275 µs).
-- Fails open on any policy failure: a missing library or ABI mismatch installs no hook, and an oversized, malformed or budget-exhausted request keeps the content.
-- New adaptive vector launcher icon — a struck-through shield over the X mark — with a themed (monochrome) layer.
-- Per-render boundary observation logs are debug-only; block logs now carry policy counters.
-- CI is split into test, build and release jobs. Signing secrets exist only in the release job, and the build checks that every native library ships in the APK.
-- The README follows the ThreadsHideAds layout; the design is documented in `docs/BRAINFUCK_ARCHITECTURE.md` and each program has a normative specification in `docs/policy/`.
+- Real-time-bidding ads (`UrtTimelineRtbImageAd`, the cards with an "Ad" label and an Open or Install button) are removed on Home, in conversations and in the Video Tab.
+  - Video Tab and conversations: the ads are dropped from the timeline's paging state before it is built. A conversation module is dropped only when everything inside it is such an ad.
+  - Home: an RTB ad is handed to X's own empty presenter, the one X itself uses when Google SSP is off, so nothing is drawn and no gap is left.
+  - Event Summaries, which X 12.37.2 also renders through its Google SSP code, are left alone.
+- The hooks are found by structure through DexKit once per X build and cached, so later starts add only a few milliseconds. Anything ambiguous installs nothing.
+- The inlined-caller lookup no longer fails with `UnsatisfiedLinkError` when the boundary resolver was served from its cache.
 
-### Also in this release
+### Added
 
-- Timeline models are classified `PROMOTED`, `ORGANIC` or `UNKNOWN`. A confident organic entry identifier skips the reflective action-graph walk, and the walk's result is cached per model instance.
-- Entry identifiers must match the whole-value grammar, so `not-promoted-x`, `unpromoted-1` or free text containing `promoted-` never count.
-- Adaptive boundaries are witnessed at runtime and unhooked after 12 invocations without a post-like model.
-- The `DexFile` fallback covers `com.x.urt`, `com.x.jetfuel` and `com.x.mappers`, post package first.
-- Video Tab replacements are built through the persistent list's own builder; the dynamic-proxy emulation is removed.
-- Release-build logs redact entry identifiers, and the unique-block key set is bounded to 512 entries.
+- The module description shown in Vector and LSPosed is translated into Simplified and Traditional Chinese, Spanish, Portuguese, Russian, Japanese, Korean, Indonesian, Hindi, Arabic, Turkish, Vietnamese, French and German.
+- A short user README in Simplified Chinese, Traditional Chinese, Spanish, Portuguese, Russian, Japanese, Korean and Indonesian, linked from a language bar on every README (#1).
 
 ### Verified
 
-- Parity with the 2.1.0 Java policy, kept as a frozen test oracle: 411 162 old-versus-new comparisons per run on the JVM and on arm64, including every character from U+0000 to U+FFFF, plus randomized, malformed-frame, concurrency and "organic is never blocked" tests.
-- On a Pixel 8 Pro, Android 17, Vector 2.2, X 12.28.0-prod.01: a cold DexKit rescan scored by the Brainfuck policy selected the same 9 boundaries with the same scores as 2.1.0; promoted posts blocked before render on the Home timeline and in post detail (`conversationthread-<id>-promoted-tweet-<id>-<hash>`); organic posts and replies untouched; search functional; Video Tab batches of 13, 24 and 35 entries filtered to 11, 22 and 31 with paging intact; no policy failures, crashes or ANRs.
+- On a Pixel 8 Pro, Android 17, Vector 2.2, X 12.37.2-prod.01: 3 full passes of 25 Home, 20 conversation and 20 Video Tab screens each showed no ad, with promoted posts still blocked and no crashes. Without the fix the same check found ads on most conversation screens and almost every Video Tab page.
+- 74 JVM tests, including the 411 162-comparison policy parity suite and the new RTB filter tests.
+- The first start after an X update spends about 3 s on DexKit discovery for the new hooks; later starts take 2–16 ms.
 
-No promoted search entry was served during the session. LSPatch, 32-bit and x86 devices were not run for this release.
+LSPatch, 32-bit and x86 devices were not run for this release.
 
 ### Version metadata
 
-- Version name: `3.0.0`
-- Android version code: `34`
-- Git tag: `v3.0.0`
-- APK filename: `TwitterHideAds-v3.0.0.apk`
+- Version name: `3.1.0`
+- Android version code: `35`
+- Git tag: `v3.1.0`
+- APK filename: `TwitterHideAds-v3.1.0.apk`
 
 ### Updating
 
-Install the v3.0.0 APK over v2.1.0, keep X (`com.twitter.android`) as the module's only scope, then force-stop and reopen X once. Confirm the framework log reports `policyCore=brainfuck-aot abi=1.0` followed by `enforcement=ACTIVE_ADAPTIVE`.
+Install the v3.1.0 APK over v3.0.0, keep X (`com.twitter.android`) as the module's only scope, then force-stop and reopen X once. Confirm the framework log reports `enforcement=ACTIVE_ADAPTIVE` and `RTB ad filter initialized` with a `mapper=` other than `none`.
